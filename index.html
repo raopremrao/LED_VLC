@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLC Web Dashboard</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --panel-bg: #1e1e1e;
+            --text-main: #e0e0e0;
+            --accent: #00ff88;
+            --border: #333;
+            --error: #ff5555;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+        }
+
+        h1 {
+            text-align: center;
+            color: var(--accent);
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
+        }
+
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            flex: 1;
+            padding: 10px;
+            background: var(--panel-bg);
+            border: 1px solid var(--border);
+            text-align: center;
+            cursor: pointer;
+            font-weight: bold;
+            transition: 0.3s;
+        }
+
+        .tab.active {
+            background: var(--accent);
+            color: #000;
+        }
+
+        .panel {
+            display: none;
+            background: var(--panel-bg);
+            padding: 20px;
+            border: 1px solid var(--border);
+            border-radius: 5px;
+        }
+
+        .panel.active {
+            display: block;
+        }
+
+        .btn {
+            background: var(--accent);
+            color: #000;
+            border: none;
+            padding: 10px 15px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            transition: opacity 0.2s;
+        }
+
+        .btn:hover {
+            opacity: 0.8;
+        }
+
+        .btn.disconnect {
+            background: var(--error);
+            color: white;
+            display: none;
+        }
+
+        textarea {
+            width: 100%;
+            height: 100px;
+            background: #000;
+            color: var(--accent);
+            border: 1px solid var(--border);
+            padding: 10px;
+            font-family: monospace;
+            font-size: 14px;
+            resize: vertical;
+            box-sizing: border-box;
+            margin-bottom: 15px;
+        }
+
+        .console {
+            background: #000;
+            color: var(--text-main);
+            height: 200px;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid var(--border);
+            font-family: monospace;
+            font-size: 13px;
+        }
+
+        .console span.tx { color: #00aaff; }
+        .console span.rx { color: var(--accent); }
+        .console span.sys { color: #888; }
+        .console span.err { color: var(--error); }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Visible Light Comm Dashboard</h1>
+
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('tx')">Transmitter (TX)</div>
+        <div class="tab" onclick="switchTab('rx')">Receiver (RX)</div>
+    </div>
+
+    <div id="panel-tx" class="panel active">
+        <div>
+            <button class="btn" id="btn-conn-tx" onclick="connectBLE('TX')">Connect to Transmitter</button>
+            <button class="btn disconnect" id="btn-disc-tx" onclick="disconnectBLE('TX')">Disconnect</button>
+            <span id="status-tx" style="margin-left:10px; color:#888;">Status: Disconnected</span>
+        </div>
+        
+        <textarea id="tx-input" placeholder="Type your message here..."></textarea>
+        <button class="btn" onclick="sendMessage()">Send Message</button>
+
+        <h3>TX Console</h3>
+        <div class="console" id="console-tx"></div>
+    </div>
+
+    <div id="panel-rx" class="panel">
+        <div>
+            <button class="btn" id="btn-conn-rx" onclick="connectBLE('RX')">Connect to Receiver</button>
+            <button class="btn disconnect" id="btn-disc-rx" onclick="disconnectBLE('RX')">Disconnect</button>
+            <span id="status-rx" style="margin-left:10px; color:#888;">Status: Disconnected</span>
+        </div>
+
+        <h3>Received Messages</h3>
+        <div class="console" id="console-rx"></div>
+        <button class="btn" style="margin-top: 10px;" onclick="clearConsole('console-rx')">Clear Screen</button>
+    </div>
+</div>
+
+<script>
+    // UUIDs for Standard Nordic UART BLE Service (Often used for SPP over BLE)
+    const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // Browser -> ESP32
+    const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // ESP32 -> Browser
+
+    let deviceTX = null;
+    let charTX_Write = null;
+
+    let deviceRX = null;
+    let charRX_Read = null;
+
+    // --- UI Logic ---
+    function switchTab(tab) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        
+        if(tab === 'tx') {
+            document.querySelectorAll('.tab')[0].classList.add('active');
+            document.getElementById('panel-tx').classList.add('active');
+        } else {
+            document.querySelectorAll('.tab')[1].classList.add('active');
+            document.getElementById('panel-rx').classList.add('active');
+        }
+    }
+
+    function logToConsole(consoleId, msg, type) {
+        const consoleEl = document.getElementById(consoleId);
+        const time = new Date().toLocaleTimeString();
+        let colorClass = 'sys';
+        if (type === 'tx') colorClass = 'tx';
+        if (type === 'rx') colorClass = 'rx';
+        if (type === 'err') colorClass = 'err';
+
+        consoleEl.innerHTML += `<div><span style="color:#555">[${time}]</span> <span class="${colorClass}">${msg}</span></div>`;
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+
+    function clearConsole(consoleId) {
+        document.getElementById(consoleId).innerHTML = '';
+    }
+
+    // --- Web Bluetooth Logic ---
+    async function connectBLE(role) {
+        try {
+            logToConsole(`console-${role.toLowerCase()}`, `Requesting BLE Device for ${role}...`, 'sys');
+            
+            const device = await navigator.bluetooth.requestDevice({
+                filters: [{ namePrefix: 'VLC_' }], // Looks for devices starting with VLC_
+                optionalServices: [UART_SERVICE_UUID]
+            });
+
+            logToConsole(`console-${role.toLowerCase()}`, `Connecting to GATT Server...`, 'sys');
+            const server = await device.gatt.connect();
+            
+            logToConsole(`console-${role.toLowerCase()}`, `Getting UART Service...`, 'sys');
+            const service = await server.getPrimaryService(UART_SERVICE_UUID);
+
+            if (role === 'TX') {
+                deviceTX = device;
+                charTX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
+                
+                // Set up disconnection listener
+                deviceTX.addEventListener('gattserverdisconnected', () => handleDisconnect('TX'));
+                
+                document.getElementById('status-tx').innerText = `Status: Connected to ${device.name}`;
+                document.getElementById('btn-conn-tx').style.display = 'none';
+                document.getElementById('btn-disc-tx').style.display = 'inline-block';
+                logToConsole('console-tx', `Successfully connected to ${device.name}`, 'sys');
+
+            } else if (role === 'RX') {
+                deviceRX = device;
+                charRX_Read = await service.getCharacteristic(UART_RX_CHAR_UUID);
+                
+                // Start receiving notifications (incoming data)
+                await charRX_Read.startNotifications();
+                charRX_Read.addEventListener('characteristicvaluechanged', handleIncomingData);
+                
+                // Set up disconnection listener
+                deviceRX.addEventListener('gattserverdisconnected', () => handleDisconnect('RX'));
+
+                document.getElementById('status-rx').innerText = `Status: Connected to ${device.name}`;
+                document.getElementById('btn-conn-rx').style.display = 'none';
+                document.getElementById('btn-disc-rx').style.display = 'inline-block';
+                logToConsole('console-rx', `Successfully connected to ${device.name}`, 'sys');
+            }
+
+        } catch (error) {
+            logToConsole(`console-${role.toLowerCase()}`, `Connection failed: ${error}`, 'err');
+        }
+    }
+
+    function disconnectBLE(role) {
+        if (role === 'TX' && deviceTX) {
+            deviceTX.gatt.disconnect();
+        } else if (role === 'RX' && deviceRX) {
+            deviceRX.gatt.disconnect();
+        }
+    }
+
+    function handleDisconnect(role) {
+        document.getElementById(`status-${role.toLowerCase()}`).innerText = `Status: Disconnected`;
+        document.getElementById(`btn-conn-${role.toLowerCase()}`).style.display = 'inline-block';
+        document.getElementById(`btn-disc-${role.toLowerCase()}`).style.display = 'none';
+        logToConsole(`console-${role.toLowerCase()}`, `Device disconnected.`, 'err');
+        
+        if (role === 'TX') {
+            deviceTX = null;
+            charTX_Write = null;
+        } else {
+            deviceRX = null;
+            charRX_Read = null;
+        }
+    }
+
+    // --- Sending and Receiving Data ---
+    async function sendMessage() {
+        const inputEl = document.getElementById('tx-input');
+        let text = inputEl.value;
+        
+        if (!text) return;
+        
+        if (!charTX_Write) {
+            logToConsole('console-tx', 'Error: Transmitter not connected!', 'err');
+            return;
+        }
+
+        try {
+            // Append a newline character so the ESP32 readStringUntil('\n') triggers
+            text += '\n'; 
+            let encoder = new TextEncoder();
+            let data = encoder.encode(text);
+            
+            // Web Bluetooth has a limit (usually 20 bytes), so chunking might be needed for long messages.
+            // For simplicity, we are sending it directly here.
+            await charTX_Write.writeValue(data);
+            
+            logToConsole('console-tx', `Sent: ${text.trim()}`, 'tx');
+            inputEl.value = ''; // Clear input
+
+        } catch (error) {
+            logToConsole('console-tx', `Send error: ${error}`, 'err');
+        }
+    }
+
+    function handleIncomingData(event) {
+        let value = event.target.value;
+        let decoder = new TextDecoder('utf-8');
+        let text = decoder.decode(value);
+        
+        logToConsole('console-rx', `${text}`, 'rx');
+    }
+</script>
+</body>
+</html>
