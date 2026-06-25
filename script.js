@@ -1,21 +1,30 @@
-// --- BLE Service UUIDs ---
+// ==========================================
+// VLC SECURE LINK - MASTER LOGIC SCRIPT
+// ==========================================
+
+// --- BLE Service UUIDs (Nordic UART) ---
 const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; 
 const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; 
 
+// --- Device State ---
 let deviceTX = null, charTX_Write = null, charTX_Notify = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
+// --- Chat Buffers ---
 let chatIncomingBuffer = "";
-let lastSentMessage = "";
-let lastSentTime = 0;
 let rxBufferTimeout = null; 
 
-// --- CHUNKING QUEUE ---
+// ==========================================
+// CHUNKING & QUEUE SYSTEM
+// ==========================================
 const CHUNK_SIZE = 25; 
 let txQueue = [];
 let isWaitingForAck = false;
 let ackTimeout = null; 
+
+// NEW: Tracks exactly when our transmission officially finished
+let lastTxCompleteTime = 0; 
 
 async function processTxQueue() {
     if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
@@ -25,7 +34,6 @@ async function processTxQueue() {
     
     try {
         let encoder = new TextEncoder();
-        // BUG FIX: Removed the + '\n' that was corrupting chunks
         await charTX_Write.writeValue(encoder.encode(chunk));
         uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
         
@@ -46,9 +54,16 @@ function handleTxAck(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     if (text.includes("ACK")) {
         clearTimeout(ackTimeout); 
+        
         setTimeout(() => {
             isWaitingForAck = false; 
-            processTxQueue(); 
+            
+            // Check if we are totally done sending
+            if (txQueue.length === 0) {
+                lastTxCompleteTime = Date.now(); // Start the 2-second blinding timer
+            } else {
+                processTxQueue(); 
+            }
         }, 100);
     }
 }
@@ -62,13 +77,28 @@ function queueMessage(text) {
         if (isLastChunk) chunk += "[EOM]";
         txQueue.push(chunk);
     }
+    
     processTxQueue();
     return true;
 }
 
-// --- INCOMING DATA & ECHO CANCELLATION ---
+// ==========================================
+// INCOMING DATA & ACTIVE BLINDING
+// ==========================================
 function handleIncomingData(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
+    
+    // ---------------------------------------------------------
+    // ACTIVE BLINDING: If we are actively sending a message, OR if 
+    // we just finished sending one less than 2.5 seconds ago, we 
+    // completely destroy all incoming data to kill the physical echo.
+    // ---------------------------------------------------------
+    if (txQueue.length > 0 || isWaitingForAck || (Date.now() - lastTxCompleteTime < 2500)) {
+        chatIncomingBuffer = ""; // Flush any garbage
+        clearTimeout(rxBufferTimeout);
+        return; 
+    }
+
     const isChatPage = document.getElementById('chat-window') !== null;
 
     if (isChatPage) {
@@ -80,7 +110,7 @@ function handleIncomingData(event) {
         if (chatIncomingBuffer.includes('[EOM]')) {
             flushRxBuffer();
         } else {
-            // Failsafe: auto-flush if EOM is dropped by a light glitch
+            // Auto-flush if [EOM] is corrupted by a light glitch
             rxBufferTimeout = setTimeout(flushRxBuffer, 4000);
         }
     } else {
@@ -94,20 +124,16 @@ function flushRxBuffer() {
     
     let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
     
-    // BULLETPROOF ECHO CANCELLATION: Strip all spaces before comparing
-    let normalizedIncoming = cleanMsg.replace(/\s+/g, '');
-    let normalizedSent = lastSentMessage.replace(/\s+/g, '');
-    
-    if (normalizedIncoming === normalizedSent && (Date.now() - lastSentTime) < 20000) {
-        lastSentMessage = ""; // Success! We muted our own echo.
-    } else if (cleanMsg.length > 0) {
+    if (cleanMsg.length > 0) {
         renderChatBubble(cleanMsg, 'rcvd');
     }
     
     chatIncomingBuffer = ""; 
 }
 
-// --- UI & BLE LOGIC ---
+// ==========================================
+// BLE CONNECTION MANAGEMENT
+// ==========================================
 async function connectBLE(role) {
     try {
         uiLog(role, `Requesting BLE Device for ${role}...`, 'sys');
@@ -156,6 +182,9 @@ function handleDisconnect(role) {
     } else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
 }
 
+// ==========================================
+// UI HANDLING
+// ==========================================
 function switchTab(tab) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -210,8 +239,6 @@ function sendChatMessage() {
     if (!charTX_Write) return alert("Please connect Transmitter (TX) first!");
 
     if (queueMessage(text)) {
-        lastSentMessage = text;
-        lastSentTime = Date.now();
         renderChatBubble(text, 'sent');
         inputEl.value = '';
     }
