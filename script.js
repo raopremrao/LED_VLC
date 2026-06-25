@@ -119,8 +119,17 @@ function handleDisconnect(role) {
 function queueMessage(text) {
     if (!text || !charTX_Write) return false;
     
+    // Slice the message into 10-character chunks
     for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-        txQueue.push(text.slice(i, i + CHUNK_SIZE));
+        let isLastChunk = (i + CHUNK_SIZE >= text.length);
+        let chunk = text.slice(i, i + CHUNK_SIZE);
+        
+        // Append the hidden [EOM] token to the very last chunk
+        if (isLastChunk) {
+            chunk += "[EOM]";
+        }
+        
+        txQueue.push(chunk);
     }
     
     processTxQueue();
@@ -134,18 +143,27 @@ function handleIncomingData(event) {
     if (isChatPage) {
         if (text.startsWith("Sys:")) return; 
         
+        // Quietly add the incoming chunk to the hidden buffer
         chatIncomingBuffer += text;
-        if (chatIncomingBuffer.includes('\n')) {
-            let cleanMsg = chatIncomingBuffer.trim();
+        
+        // ONLY draw the bubble if the buffer contains the [EOM] token
+        if (chatIncomingBuffer.includes('[EOM]')) {
             
+            // Clean up the text: remove the token and strip any accidental newlines
+            let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
+            
+            // Echo cancellation
             if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 15000) {
                 lastSentMessage = ""; 
             } else if (cleanMsg.length > 0) {
                 renderChatBubble(cleanMsg, 'rcvd');
             }
+            
+            // Clear the buffer for the next message
             chatIncomingBuffer = "";
         }
     } else {
+        // Keep the Dashboard console behaving normally
         if (text.startsWith("Sys:")) uiLog('RX', text.trim(), 'sys');
         else uiLog('RX', text, 'rx');
     }
