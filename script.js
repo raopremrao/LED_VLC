@@ -1,51 +1,23 @@
-// ==========================================
-// VLC SECURE LINK - MASTER LOGIC SCRIPT
-// ==========================================
-
+// --- BLE Service UUIDs ---
 const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; 
-const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; 
+const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // Browser -> ESP32 Write
+const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // ESP32 -> Browser Notify
 
 let deviceTX = null, charTX_Write = null, charTX_Notify = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
 let chatIncomingBuffer = "";
-let rxBufferTimeout = null; 
+let lastSentMessage = "";
+let lastSentTime = 0;
 
 // ==========================================
-// CHUNKING
+// CHUNKING & ROBUST QUEUE SYSTEM
 // ==========================================
-const CHUNK_SIZE = 15; // Safe headroom for [EOM] within BLE 20-byte MTU
+const CHUNK_SIZE = 10;
 let txQueue = [];
 let isWaitingForAck = false;
-let ackTimeout = null; 
+let ackTimeout = null; // New: Timer to prevent infinite freezing
 
-// ==========================================
-// FLAG-BASED LOOPBACK BLIND
-// Only active while the TX ESP32 is physically flashing the LED.
-// Timeline: first BLE write → each ACK resets the 600ms countdown → blind off.
-// 600ms covers the echo path: 250ms RX idle + 50ms BLE + 300ms safety margin.
-// This is never triggered by the OTHER person's reply, only our own echo.
-// ==========================================
-let txBlindActive = false;
-let txBlindTimer = null;
-
-function startTxBlind() {
-    txBlindActive = true;
-    clearTimeout(txBlindTimer);
-}
-
-function extendTxBlind() {
-    // Called after each ACK. Blind deactivates 600ms after the LAST ACK.
-    clearTimeout(txBlindTimer);
-    txBlindTimer = setTimeout(() => {
-        txBlindActive = false;
-    }, 600);
-}
-
-// ==========================================
-// TX QUEUE & ACK HANDLING
-// ==========================================
 async function processTxQueue() {
     if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
     
@@ -54,105 +26,39 @@ async function processTxQueue() {
     
     try {
         let encoder = new TextEncoder();
-        await charTX_Write.writeValue(encoder.encode(chunk));
-        
-        startTxBlind(); // Blind ON — ESP32 is now flashing
+        await charTX_Write.writeValue(encoder.encode(chunk + '\n'));
         uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
         
-        // Failsafe: if ESP32 drops the ACK, auto-recover after 4 seconds
+        // FAILSAFE: If the ESP32 drops the chunk and never ACKs, 
+        // unlock the queue after 4 seconds to prevent permanent freezing.
         ackTimeout = setTimeout(() => {
-            uiLog('TX', `Hardware ACK Timeout! Auto-recovering...`, 'err');
-            extendTxBlind(); // Still extend blind on timeout
+            uiLog('TX', `Hardware ACK Timeout! Auto-recovering queue...`, 'err');
             isWaitingForAck = false;
-            processTxQueue(); 
+            processTxQueue();
         }, 4000);
 
     } catch (error) {
         uiLog('TX', `Send error: ${error}`, 'err');
         isWaitingForAck = false;
-        setTimeout(processTxQueue, 1000); 
+        setTimeout(processTxQueue, 1000); // Retry next chunk after a second
     }
 }
 
 function handleTxAck(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     if (text.includes("ACK")) {
-        clearTimeout(ackTimeout); 
-        extendTxBlind(); // Reset the 600ms countdown from this ACK
-
+        clearTimeout(ackTimeout); // Clear the failsafe timer
+        
+        // RACE CONDITION FIX: Give the ESP32 150ms to finish its internal 
+        // C++ loop before we hammer it with the next chunk of data.
         setTimeout(() => {
             isWaitingForAck = false; 
             processTxQueue(); 
         }, 150);
     }
 }
-
-function queueMessage(text) {
-    if (!text || !charTX_Write) return false;
-    
-    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-        let isLastChunk = (i + CHUNK_SIZE >= text.length);
-        let chunk = text.slice(i, i + CHUNK_SIZE);
-        if (isLastChunk) chunk += "[EOM]";
-        txQueue.push(chunk);
-    }
-    
-    processTxQueue();
-    return true;
-}
-
 // ==========================================
-// INCOMING DATA PARSER
-// ==========================================
-function handleIncomingData(event) {
-    let text = new TextDecoder('utf-8').decode(event.target.value);
-    const isChatPage = document.getElementById('chat-window') !== null;
 
-    // LOOPBACK BLIND: Discard data only while WE are actively transmitting.
-    // txBlindActive is true from first BLE write until 600ms after the last ACK.
-    // The other person's reply always arrives AFTER they type it (seconds later),
-    // so it is never caught by this flag.
-    if (txBlindActive) {
-        chatIncomingBuffer = "";
-        clearTimeout(rxBufferTimeout);
-        return;
-    }
-
-    if (isChatPage) {
-        if (text.startsWith("Sys:")) return; 
-        
-        chatIncomingBuffer += text;
-        clearTimeout(rxBufferTimeout); 
-
-        // [EOM] is embedded in the VLC data by the sender's JS, so the RX ESP32
-        // decodes and forwards it verbatim — detect it for instant flush.
-        if (chatIncomingBuffer.includes('[EOM]')) {
-            flushRxBuffer();
-        } else {
-            // Fallback: flush after 4 seconds of silence
-            rxBufferTimeout = setTimeout(flushRxBuffer, 4000);
-        }
-    } else {
-        if (text.startsWith("Sys:")) uiLog('RX', text.trim(), 'sys');
-        else uiLog('RX', text, 'rx');
-    }
-}
-
-function flushRxBuffer() {
-    if (!chatIncomingBuffer) return;
-    
-    let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
-    
-    if (cleanMsg.length > 0) {
-        renderChatBubble(cleanMsg, 'rcvd');
-    }
-    
-    chatIncomingBuffer = ""; 
-}
-
-// ==========================================
-// BLE CONNECTION MANAGEMENT
-// ==========================================
 async function connectBLE(role) {
     try {
         uiLog(role, `Requesting BLE Device for ${role}...`, 'sys');
@@ -167,25 +73,32 @@ async function connectBLE(role) {
         if (role === 'TX') {
             deviceTX = device;
             charTX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
+            
             charTX_Notify = await service.getCharacteristic(UART_RX_CHAR_UUID);
             await charTX_Notify.startNotifications();
             charTX_Notify.addEventListener('characteristicvaluechanged', handleTxAck);
 
             deviceTX.addEventListener('gattserverdisconnected', () => handleDisconnect('TX'));
             updateConnectionUI('TX', true, device.name);
+            uiLog('TX', `Connected to ${device.name}`, 'sys');
         } 
         else if (role === 'RX') {
             deviceRX = device;
             charRX_Read = await service.getCharacteristic(UART_RX_CHAR_UUID);
             charRX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
+            
             await charRX_Read.startNotifications();
             charRX_Read.addEventListener('characteristicvaluechanged', handleIncomingData);
             deviceRX.addEventListener('gattserverdisconnected', () => handleDisconnect('RX'));
 
             updateConnectionUI('RX', true, device.name);
+            uiLog('RX', `Connected to ${device.name}`, 'sys');
+            
             if (document.getElementById('rx-mode-select')) changeRxMode(); 
         }
-    } catch (e) { uiLog(role, `Connection failed: ${e}`, 'err'); }
+    } catch (error) {
+        uiLog(role, `Connection failed: ${error}`, 'err');
+    }
 }
 
 function disconnectBLE(role) {
@@ -195,20 +108,50 @@ function disconnectBLE(role) {
 
 function handleDisconnect(role) {
     updateConnectionUI(role, false, "");
+    uiLog(role, `Device disconnected.`, 'err');
     if (role === 'TX') { 
         deviceTX = null; charTX_Write = null; charTX_Notify = null; 
         txQueue = []; isWaitingForAck = false; clearTimeout(ackTimeout);
-        // Clear blind state on TX disconnect
-        txBlindActive = false;
-        clearTimeout(txBlindTimer);
-    } else { 
-        deviceRX = null; charRX_Read = null; charRX_Write = null; 
+    } 
+    else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
+}
+
+function queueMessage(text) {
+    if (!text || !charTX_Write) return false;
+    
+    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+        txQueue.push(text.slice(i, i + CHUNK_SIZE));
+    }
+    
+    processTxQueue();
+    return true;
+}
+
+function handleIncomingData(event) {
+    let text = new TextDecoder('utf-8').decode(event.target.value);
+    const isChatPage = document.getElementById('chat-window') !== null;
+
+    if (isChatPage) {
+        if (text.startsWith("Sys:")) return; 
+        
+        chatIncomingBuffer += text;
+        if (chatIncomingBuffer.includes('\n')) {
+            let cleanMsg = chatIncomingBuffer.trim();
+            
+            if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 15000) {
+                lastSentMessage = ""; 
+            } else if (cleanMsg.length > 0) {
+                renderChatBubble(cleanMsg, 'rcvd');
+            }
+            chatIncomingBuffer = "";
+        }
+    } else {
+        if (text.startsWith("Sys:")) uiLog('RX', text.trim(), 'sys');
+        else uiLog('RX', text, 'rx');
     }
 }
 
-// ==========================================
-// UI HANDLING
-// ==========================================
+// --- UI HANDLING ---
 function switchTab(tab) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -224,9 +167,12 @@ function switchTab(tab) {
 function updateConnectionUI(role, isConnected, deviceName) {
     const isChatPage = document.getElementById('chat-window') !== null;
     if (isChatPage) {
-        document.getElementById('wa-status-text').innerText = `TX: ${deviceTX ? '🟢' : '🔴'} | RX: ${deviceRX ? '🟢' : '🔴'}`;
+        const statusText = document.getElementById('wa-status-text');
+        let txStatus = deviceTX ? '🟢' : '🔴';
+        let rxStatus = deviceRX ? '🟢' : '🔴';
+        statusText.innerText = `TX: ${txStatus} | RX: ${rxStatus}`;
     } else {
-        document.getElementById(`status-${role.toLowerCase()}`).innerText = isConnected ? `Status: Connected` : `Status: Disconnected`;
+        document.getElementById(`status-${role.toLowerCase()}`).innerText = isConnected ? `Status: Connected to ${deviceName}` : `Status: Disconnected`;
         document.getElementById(`btn-conn-${role.toLowerCase()}`).style.display = isConnected ? 'none' : 'inline-block';
         document.getElementById(`btn-disc-${role.toLowerCase()}`).style.display = isConnected ? 'inline-block' : 'none';
         if (role === 'RX') document.getElementById('rx-mode-select').disabled = !isConnected;
@@ -236,8 +182,12 @@ function updateConnectionUI(role, isConnected, deviceName) {
 function uiLog(role, msg, type) {
     const consoleEl = document.getElementById(`console-${role.toLowerCase()}`);
     if (!consoleEl) return; 
-    let colorClass = type === 'tx' ? 'tx' : (type === 'rx' ? 'rx' : (type === 'err' ? 'err' : 'sys'));
-    consoleEl.innerHTML += `<div><span style="color:#555">[${new Date().toLocaleTimeString()}]</span> <span class="${colorClass}">${msg}</span></div>`;
+    const time = new Date().toLocaleTimeString();
+    let colorClass = 'sys';
+    if (type === 'tx') colorClass = 'tx';
+    if (type === 'rx') colorClass = 'rx';
+    if (type === 'err') colorClass = 'err';
+    consoleEl.innerHTML += `<div><span style="color:#555">[${time}]</span> <span class="${colorClass}">${msg}</span></div>`;
     consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
@@ -248,32 +198,32 @@ async function changeRxMode() {
     const modeCommand = document.getElementById('rx-mode-select').value + '\n';
     try {
         await charRX_Write.writeValue(new TextEncoder().encode(modeCommand));
-    } catch (e) {}
+        uiLog('RX', `Sending setting -> ${modeCommand.trim()}`, 'sys');
+    } catch (e) { uiLog('RX', `Setting Error`, 'err'); }
 }
 
 function dashboardSendMessage() {
     const inputEl = document.getElementById('tx-input');
-    if (queueMessage(inputEl.value)) inputEl.value = ''; 
+    if (queueMessage(inputEl.value)) {
+        uiLog('TX', `Queued: ${inputEl.value.trim()}`, 'tx');
+        inputEl.value = ''; 
+    }
 }
 
+// --- CHAT UI ENGINE ---
 function sendChatMessage() {
     const inputEl = document.getElementById('chat-input');
     const text = inputEl.value.trim();
     if (!text) return;
 
-    // Hard block: TX is required to send anything
     if (!charTX_Write) {
-        alert("TX not connected!\n\nTap the TX button and select your VLC_TX device first.");
+        alert("Please connect your Transmitter (TX) using the top right icon!");
         return;
     }
 
-    // Soft warning: RX is required to receive replies
-    if (!charRX_Read) {
-        const proceed = confirm("RX not connected — you won't see replies from the other side.\n\nConnect RX after sending, or tap Cancel to connect now.");
-        if (!proceed) return;
-    }
-
     if (queueMessage(text)) {
+        lastSentMessage = text;
+        lastSentTime = Date.now();
         renderChatBubble(text, 'sent');
         inputEl.value = '';
     }
@@ -295,13 +245,11 @@ function renderChatBubble(text, type) {
 window.onload = () => {
     const chatInput = document.getElementById('chat-input');
     if (chatInput) {
-        chatInput.addEventListener("keypress", (e) => {
-            if (e.key === "Enter") { e.preventDefault(); sendChatMessage(); }
+        chatInput.addEventListener("keypress", function(event) {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                sendChatMessage();
+            }
         });
-    }
-
-    const statusEl = document.getElementById('wa-status-text');
-    if (statusEl) {
-        statusEl.title = "Connect TX first (your transmitter), then RX (your receiver)";
     }
 };
