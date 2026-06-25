@@ -11,18 +11,18 @@ const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // ESP32 -> Br
 let deviceTX = null, charTX_Write = null, charTX_Notify = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
-// --- Chat Buffers & Echo Cancellation ---
+// --- Chat Buffers & Timeouts ---
 let chatIncomingBuffer = "";
-let lastSentMessage = "";
-let lastSentTime = 0;
+let rxBufferTimeout = null; 
 
 // ==========================================
 // CHUNKING & ROBUST QUEUE SYSTEM
 // ==========================================
-const CHUNK_SIZE = 50; // Safe size to prevent radio starvation
+const CHUNK_SIZE = 50; 
 let txQueue = [];
 let isWaitingForAck = false;
 let ackTimeout = null; 
+let lastTxTime = 0; // MASTER MUTE TIMER
 
 async function processTxQueue() {
     if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
@@ -31,13 +31,14 @@ async function processTxQueue() {
     let chunk = txQueue.shift(); 
     
     try {
+        lastTxTime = Date.now(); // Start the Mute timer
         let encoder = new TextEncoder();
         await charTX_Write.writeValue(encoder.encode(chunk + '\n'));
         uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
         
-        // FAILSAFE: Unlock the queue if ESP32 drops the packet
+        // FAILSAFE 1: Unlock queue if ESP32 drops the packet
         ackTimeout = setTimeout(() => {
-            uiLog('TX', `Hardware ACK Timeout! Auto-recovering queue...`, 'err');
+            uiLog('TX', `Hardware ACK Timeout! Auto-recovering...`, 'err');
             isWaitingForAck = false;
             processTxQueue();
         }, 4000);
@@ -45,7 +46,7 @@ async function processTxQueue() {
     } catch (error) {
         uiLog('TX', `Send error: ${error}`, 'err');
         isWaitingForAck = false;
-        setTimeout(processTxQueue, 1000); // Retry next chunk after a second
+        setTimeout(processTxQueue, 1000); 
     }
 }
 
@@ -53,8 +54,9 @@ function handleTxAck(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     if (text.includes("ACK")) {
         clearTimeout(ackTimeout); 
+        lastTxTime = Date.now(); // Refresh Mute timer on ACK
         
-        // RACE CONDITION FIX: Give the ESP32 150ms to breathe
+        // RACE CONDITION FIX: Give ESP32 150ms to breathe
         setTimeout(() => {
             isWaitingForAck = false; 
             processTxQueue(); 
@@ -65,15 +67,11 @@ function handleTxAck(event) {
 function queueMessage(text) {
     if (!text || !charTX_Write) return false;
     
-    // Slice the message and inject the End of Message [EOM] token
+    // Slice message and inject the [EOM] token at the very end
     for (let i = 0; i < text.length; i += CHUNK_SIZE) {
         let isLastChunk = (i + CHUNK_SIZE >= text.length);
         let chunk = text.slice(i, i + CHUNK_SIZE);
-        
-        if (isLastChunk) {
-            chunk += "[EOM]";
-        }
-        
+        if (isLastChunk) chunk += "[EOM]";
         txQueue.push(chunk);
     }
     
@@ -82,38 +80,49 @@ function queueMessage(text) {
 }
 
 // ==========================================
-// INCOMING DATA PARSER
+// INCOMING DATA PARSER & MASTER MUTE
 // ==========================================
 function handleIncomingData(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     const isChatPage = document.getElementById('chat-window') !== null;
 
+    // ---------------------------------------------------------
+    // MASTER MUTE: Completely blind the browser to incoming data
+    // if the Queue is active, or if we sent a chunk within the last 
+    // 2500ms. This permanently destroys the physical loopback echo.
+    // ---------------------------------------------------------
+    if (isWaitingForAck || txQueue.length > 0 || (Date.now() - lastTxTime < 2500)) {
+        return; 
+    }
+
     if (isChatPage) {
         if (text.startsWith("Sys:")) return; 
         
         chatIncomingBuffer += text;
-        
-        // Wait until we see the [EOM] token to draw the bubble
+        clearTimeout(rxBufferTimeout); // Reset failsafe timer
+
         if (chatIncomingBuffer.includes('[EOM]')) {
-            
-            // Clean the token and stray newlines out of the final text
-            let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
-            
-            // Echo cancellation: Ignore if it perfectly matches what we just sent
-            if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 15000) {
-                lastSentMessage = ""; 
-            } else if (cleanMsg.length > 0) {
-                renderChatBubble(cleanMsg, 'rcvd');
-            }
-            
-            // Flush buffer for the next message
-            chatIncomingBuffer = "";
+            flushRxBuffer();
+        } else {
+            // FAILSAFE 2: If the [EOM] token is corrupted by an optical glitch,
+            // force flush whatever text we received after 4 seconds of silence.
+            rxBufferTimeout = setTimeout(flushRxBuffer, 4000);
         }
     } else {
-        // Dashboard Console Output
         if (text.startsWith("Sys:")) uiLog('RX', text.trim(), 'sys');
         else uiLog('RX', text, 'rx');
     }
+}
+
+function flushRxBuffer() {
+    if (!chatIncomingBuffer) return;
+    
+    // Clean up the text: strip tokens and stray newlines
+    let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
+    if (cleanMsg.length > 0) {
+        renderChatBubble(cleanMsg, 'rcvd');
+    }
+    chatIncomingBuffer = ""; // Reset for next message
 }
 
 // ==========================================
@@ -134,7 +143,6 @@ async function connectBLE(role) {
             deviceTX = device;
             charTX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
             
-            // Listen for ACKs
             charTX_Notify = await service.getCharacteristic(UART_RX_CHAR_UUID);
             await charTX_Notify.startNotifications();
             charTX_Notify.addEventListener('characteristicvaluechanged', handleTxAck);
@@ -252,8 +260,6 @@ function sendChatMessage() {
     }
 
     if (queueMessage(text)) {
-        lastSentMessage = text;
-        lastSentTime = Date.now();
         renderChatBubble(text, 'sent');
         inputEl.value = '';
     }
@@ -275,7 +281,7 @@ function renderChatBubble(text, type) {
     windowEl.scrollTop = windowEl.scrollHeight;
 }
 
-// Add event listener for Enter key in Chat Input
+// Detect Enter key
 window.onload = () => {
     const chatInput = document.getElementById('chat-input');
     if (chatInput) {
