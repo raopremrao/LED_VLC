@@ -11,35 +11,50 @@ let lastSentMessage = "";
 let lastSentTime = 0;
 
 // ==========================================
-// NEW: CHUNKING & QUEUE SYSTEM
+// CHUNKING & ROBUST QUEUE SYSTEM
 // ==========================================
-const CHUNK_SIZE = 50;
+const CHUNK_SIZE = 10;
 let txQueue = [];
 let isWaitingForAck = false;
+let ackTimeout = null; // New: Timer to prevent infinite freezing
 
 async function processTxQueue() {
-    // If queue is empty or we are waiting for the ESP32 to finish flashing, do nothing
     if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
     
-    isWaitingForAck = true; // Lock the queue
-    let chunk = txQueue.shift(); // Grab the next 10 characters
+    isWaitingForAck = true; 
+    let chunk = txQueue.shift(); 
     
     try {
         let encoder = new TextEncoder();
         await charTX_Write.writeValue(encoder.encode(chunk + '\n'));
         uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
+        
+        // FAILSAFE: If the ESP32 drops the chunk and never ACKs, 
+        // unlock the queue after 4 seconds to prevent permanent freezing.
+        ackTimeout = setTimeout(() => {
+            uiLog('TX', `Hardware ACK Timeout! Auto-recovering queue...`, 'err');
+            isWaitingForAck = false;
+            processTxQueue();
+        }, 4000);
+
     } catch (error) {
         uiLog('TX', `Send error: ${error}`, 'err');
         isWaitingForAck = false;
+        setTimeout(processTxQueue, 1000); // Retry next chunk after a second
     }
 }
 
-// When the ESP32 finishes flashing, it sends an ACK back to unlock the queue
 function handleTxAck(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     if (text.includes("ACK")) {
-        isWaitingForAck = false; // Unlock
-        processTxQueue();        // Send the next chunk
+        clearTimeout(ackTimeout); // Clear the failsafe timer
+        
+        // RACE CONDITION FIX: Give the ESP32 150ms to finish its internal 
+        // C++ loop before we hammer it with the next chunk of data.
+        setTimeout(() => {
+            isWaitingForAck = false; 
+            processTxQueue(); 
+        }, 150);
     }
 }
 // ==========================================
@@ -59,7 +74,6 @@ async function connectBLE(role) {
             deviceTX = device;
             charTX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
             
-            // NEW: We must listen for the ACK from the Transmitter to know when it finishes a chunk
             charTX_Notify = await service.getCharacteristic(UART_RX_CHAR_UUID);
             await charTX_Notify.startNotifications();
             charTX_Notify.addEventListener('characteristicvaluechanged', handleTxAck);
@@ -97,7 +111,7 @@ function handleDisconnect(role) {
     uiLog(role, `Device disconnected.`, 'err');
     if (role === 'TX') { 
         deviceTX = null; charTX_Write = null; charTX_Notify = null; 
-        txQueue = []; isWaitingForAck = false; // Reset queue on disconnect
+        txQueue = []; isWaitingForAck = false; clearTimeout(ackTimeout);
     } 
     else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
 }
@@ -105,12 +119,10 @@ function handleDisconnect(role) {
 function queueMessage(text) {
     if (!text || !charTX_Write) return false;
     
-    // Slice the message into 10-character chunks
     for (let i = 0; i < text.length; i += CHUNK_SIZE) {
         txQueue.push(text.slice(i, i + CHUNK_SIZE));
     }
     
-    // Kickstart the queue
     processTxQueue();
     return true;
 }
