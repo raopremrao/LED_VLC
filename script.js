@@ -64,7 +64,7 @@ function handleTxAck(event) {
             } else {
                 processTxQueue(); 
             }
-        }, 100);
+        }, 150);
     }
 }
 
