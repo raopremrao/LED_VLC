@@ -3,12 +3,46 @@ const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // Browser -> ESP32 Write
 const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // ESP32 -> Browser Notify
 
-let deviceTX = null, charTX_Write = null;
+let deviceTX = null, charTX_Write = null, charTX_Notify = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
 let chatIncomingBuffer = "";
 let lastSentMessage = "";
 let lastSentTime = 0;
+
+// ==========================================
+// NEW: CHUNKING & QUEUE SYSTEM
+// ==========================================
+const CHUNK_SIZE = 10;
+let txQueue = [];
+let isWaitingForAck = false;
+
+async function processTxQueue() {
+    // If queue is empty or we are waiting for the ESP32 to finish flashing, do nothing
+    if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
+    
+    isWaitingForAck = true; // Lock the queue
+    let chunk = txQueue.shift(); // Grab the next 10 characters
+    
+    try {
+        let encoder = new TextEncoder();
+        await charTX_Write.writeValue(encoder.encode(chunk + '\n'));
+        uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
+    } catch (error) {
+        uiLog('TX', `Send error: ${error}`, 'err');
+        isWaitingForAck = false;
+    }
+}
+
+// When the ESP32 finishes flashing, it sends an ACK back to unlock the queue
+function handleTxAck(event) {
+    let text = new TextDecoder('utf-8').decode(event.target.value);
+    if (text.includes("ACK")) {
+        isWaitingForAck = false; // Unlock
+        processTxQueue();        // Send the next chunk
+    }
+}
+// ==========================================
 
 async function connectBLE(role) {
     try {
@@ -24,6 +58,12 @@ async function connectBLE(role) {
         if (role === 'TX') {
             deviceTX = device;
             charTX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
+            
+            // NEW: We must listen for the ACK from the Transmitter to know when it finishes a chunk
+            charTX_Notify = await service.getCharacteristic(UART_RX_CHAR_UUID);
+            await charTX_Notify.startNotifications();
+            charTX_Notify.addEventListener('characteristicvaluechanged', handleTxAck);
+
             deviceTX.addEventListener('gattserverdisconnected', () => handleDisconnect('TX'));
             updateConnectionUI('TX', true, device.name);
             uiLog('TX', `Connected to ${device.name}`, 'sys');
@@ -55,20 +95,24 @@ function disconnectBLE(role) {
 function handleDisconnect(role) {
     updateConnectionUI(role, false, "");
     uiLog(role, `Device disconnected.`, 'err');
-    if (role === 'TX') { deviceTX = null; charTX_Write = null; } 
+    if (role === 'TX') { 
+        deviceTX = null; charTX_Write = null; charTX_Notify = null; 
+        txQueue = []; isWaitingForAck = false; // Reset queue on disconnect
+    } 
     else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
 }
 
-async function sendMessage(text) {
+function queueMessage(text) {
     if (!text || !charTX_Write) return false;
-    try {
-        let encoder = new TextEncoder();
-        await charTX_Write.writeValue(encoder.encode(text + '\n'));
-        return true;
-    } catch (error) {
-        uiLog('TX', `Send error: ${error}`, 'err');
-        return false;
+    
+    // Slice the message into 10-character chunks
+    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+        txQueue.push(text.slice(i, i + CHUNK_SIZE));
     }
+    
+    // Kickstart the queue
+    processTxQueue();
+    return true;
 }
 
 function handleIncomingData(event) {
@@ -82,9 +126,8 @@ function handleIncomingData(event) {
         if (chatIncomingBuffer.includes('\n')) {
             let cleanMsg = chatIncomingBuffer.trim();
             
-            // ECHO CANCELLATION: If the incoming message matches what we just sent within the last 15 seconds, discard it.
             if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 15000) {
-                lastSentMessage = ""; // Clear it so we don't accidentally block the next message
+                lastSentMessage = ""; 
             } else if (cleanMsg.length > 0) {
                 renderChatBubble(cleanMsg, 'rcvd');
             }
@@ -111,9 +154,7 @@ function switchTab(tab) {
 
 function updateConnectionUI(role, isConnected, deviceName) {
     const isChatPage = document.getElementById('chat-window') !== null;
-
     if (isChatPage) {
-        // WhatsApp Style Header Updates
         const statusText = document.getElementById('wa-status-text');
         let txStatus = deviceTX ? '🟢' : '🔴';
         let rxStatus = deviceRX ? '🟢' : '🔴';
@@ -129,13 +170,11 @@ function updateConnectionUI(role, isConnected, deviceName) {
 function uiLog(role, msg, type) {
     const consoleEl = document.getElementById(`console-${role.toLowerCase()}`);
     if (!consoleEl) return; 
-    
     const time = new Date().toLocaleTimeString();
     let colorClass = 'sys';
     if (type === 'tx') colorClass = 'tx';
     if (type === 'rx') colorClass = 'rx';
     if (type === 'err') colorClass = 'err';
-
     consoleEl.innerHTML += `<div><span style="color:#555">[${time}]</span> <span class="${colorClass}">${msg}</span></div>`;
     consoleEl.scrollTop = consoleEl.scrollHeight;
 }
@@ -151,16 +190,16 @@ async function changeRxMode() {
     } catch (e) { uiLog('RX', `Setting Error`, 'err'); }
 }
 
-async function dashboardSendMessage() {
+function dashboardSendMessage() {
     const inputEl = document.getElementById('tx-input');
-    if (await sendMessage(inputEl.value)) {
-        uiLog('TX', `Sent: ${inputEl.value.trim()}`, 'tx');
+    if (queueMessage(inputEl.value)) {
+        uiLog('TX', `Queued: ${inputEl.value.trim()}`, 'tx');
         inputEl.value = ''; 
     }
 }
 
 // --- CHAT UI ENGINE ---
-async function sendChatMessage() {
+function sendChatMessage() {
     const inputEl = document.getElementById('chat-input');
     const text = inputEl.value.trim();
     if (!text) return;
@@ -170,7 +209,7 @@ async function sendChatMessage() {
         return;
     }
 
-    if (await sendMessage(text)) {
+    if (queueMessage(text)) {
         lastSentMessage = text;
         lastSentTime = Date.now();
         renderChatBubble(text, 'sent');
@@ -181,14 +220,11 @@ async function sendChatMessage() {
 function renderChatBubble(text, type) {
     const windowEl = document.getElementById('chat-window');
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    
     const bubbleWrapper = document.createElement('div');
     bubbleWrapper.className = `wa-bubble-wrapper ${type}`;
-    
     const bubble = document.createElement('div');
     bubble.className = `wa-bubble`;
     bubble.innerHTML = `<span class="wa-msg-text">${text}</span><span class="wa-msg-time">${time}</span>`;
-    
     bubbleWrapper.appendChild(bubble);
     windowEl.appendChild(bubbleWrapper);
     windowEl.scrollTop = windowEl.scrollHeight;
