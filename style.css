@@ -6,9 +6,8 @@
     --border: #333;
     --error: #ff5555;
     
-    /* WhatsApp Dark Theme Colors */
+    /* WhatsApp Colors */
     --wa-bg: #0b141a;
-    --wa-app-bg: #111b21;
     --wa-header: #202c33;
     --wa-input-bg: #2a3942;
     --wa-sent: #005c4b;
@@ -19,7 +18,7 @@
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: 'Segoe UI', Helvetica Neue, Helvetica, Arial, sans-serif;
     background-color: var(--bg-color);
     color: var(--text-main);
     margin: 0;
@@ -54,59 +53,56 @@ textarea { height: 100px; resize: vertical; margin-bottom: 15px; }
 .console span.err { color: var(--error); }
 
 /* =========================================
-   NEW MOBILE-FIRST WHATSAPP UI
+   NEW WHATSAPP CHAT UI
 ========================================= */
 body.chat-body {
     padding: 0;
     margin: 0;
-    background-color: var(--wa-app-bg);
-    /* 100dvh prevents mobile browser bars from hiding the input */
-    height: 100dvh; 
-    height: 100vh; /* Fallback */
+    background-color: var(--wa-bg);
+    height: 100vh;
     display: flex;
     justify-content: center;
     align-items: center;
-    overflow: hidden;
 }
 
 .wa-app-container {
     width: 100%;
-    max-width: 600px; 
-    height: 100%;
+    max-width: 600px; /* Mobile width constraint on desktop */
+    height: 100vh;
     display: flex;
     flex-direction: column;
     background-color: var(--wa-bg);
+    position: relative;
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
 }
 
 .wa-header {
     background-color: var(--wa-header);
-    min-height: 60px;
+    height: 60px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 10px 0 5px;
+    padding: 0 15px;
     z-index: 10;
-    /* Safe area for iOS status bar */
-    padding-top: env(safe-area-inset-top); 
 }
 
-.wa-header-left { display: flex; align-items: center; gap: 8px; }
-.wa-back-btn { color: var(--wa-text); display: flex; align-items: center; padding: 5px; text-decoration: none; cursor: pointer; }
+.wa-header-left { display: flex; align-items: center; gap: 12px; }
+.wa-back-btn { color: var(--wa-text); text-decoration: none; font-size: 20px; font-weight: bold; cursor: pointer; }
 .wa-avatar { width: 40px; height: 40px; background-color: #667781; border-radius: 50%; background-image: url('data:image/svg+xml;utf8,<svg fill="white" viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>'); background-size: cover; }
-.wa-contact-name { color: var(--wa-text); font-weight: 500; font-size: 16px; margin-bottom: 2px;}
-.wa-contact-status { color: var(--wa-time); font-size: 12px; }
+.wa-contact-name { color: var(--wa-text); font-weight: 500; font-size: 16px; }
+.wa-contact-status { color: var(--wa-time); font-size: 12px; margin-top: 2px;}
 
-.wa-header-right { display: flex; gap: 5px; }
-.wa-icon-btn { background: none; border: none; padding: 8px; color: var(--wa-time); display: flex; align-items: center; gap: 4px; cursor: pointer; border-radius: 20px; transition: 0.2s; }
-.wa-icon-btn:hover { background: rgba(255,255,255,0.05); }
+.wa-header-right { display: flex; gap: 15px; }
+.wa-icon-btn { background: none; border: none; color: var(--wa-time); font-size: 18px; cursor: pointer; transition: 0.2s; }
+.wa-icon-btn:hover { color: var(--wa-text); }
 
 .wa-chat-window {
     flex: 1;
-    padding: 15px 4%;
+    padding: 20px 5%;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 8px;
     background-color: var(--wa-bg);
 }
 
@@ -118,17 +114,16 @@ body.chat-body {
     padding: 8px 12px;
     border-radius: 8px;
     align-self: center;
-    margin-bottom: 10px;
-    max-width: 90%;
-    box-shadow: 0 1px 0.5px rgba(0,0,0,0.13);
+    margin-bottom: 15px;
+    max-width: 85%;
 }
 
-.wa-bubble-wrapper { display: flex; width: 100%; }
+.wa-bubble-wrapper { display: flex; width: 100%; margin-bottom: 2px; }
 .wa-bubble-wrapper.sent { justify-content: flex-end; }
 .wa-bubble-wrapper.rcvd { justify-content: flex-start; }
 
 .wa-bubble {
-    max-width: 80%;
+    max-width: 65%;
     padding: 6px 7px 8px 9px;
     border-radius: 7.5px;
     position: relative;
@@ -142,46 +137,35 @@ body.chat-body {
 .wa-bubble-wrapper.sent .wa-bubble { background-color: var(--wa-sent); color: var(--wa-text); border-top-right-radius: 0; }
 .wa-bubble-wrapper.rcvd .wa-bubble { background-color: var(--wa-rcvd); color: var(--wa-text); border-top-left-radius: 0; }
 
-.wa-msg-text { font-size: 15px; line-height: 20px; word-wrap: break-word; flex: 1; margin-bottom: 2px;}
-.wa-msg-time { font-size: 11px; color: rgba(255,255,255,0.6); margin-bottom: -3px; margin-left: 5px; white-space: nowrap; }
+.wa-msg-text { font-size: 14.2px; line-height: 19px; word-wrap: break-word; flex: 1; }
+.wa-msg-time { font-size: 11px; color: rgba(255,255,255,0.6); margin-bottom: -2px; margin-left: 5px; white-space: nowrap; }
 
-/* Fixed Footer Layout */
 .wa-footer {
-    min-height: 60px;
-    padding: 8px 10px;
-    /* Safe area for iOS home bar */
-    padding-bottom: calc(8px + env(safe-area-inset-bottom)); 
+    background-color: var(--wa-header);
+    min-height: 62px;
+    padding: 10px 15px;
     display: flex;
     align-items: center;
-    gap: 8px;
-    background-color: var(--wa-app-bg);
-}
-
-.wa-input-wrapper {
-    flex: 1;
-    background-color: var(--wa-input-bg);
-    border-radius: 24px;
-    display: flex;
-    align-items: center;
-    padding: 0 15px;
-    min-height: 48px;
+    gap: 10px;
+    box-sizing: border-box;
 }
 
 .wa-input {
     flex: 1;
-    background: transparent;
+    background-color: var(--wa-input-bg);
     color: var(--wa-text);
     border: none;
-    font-size: 16px;
+    border-radius: 8px;
+    padding: 12px 15px;
+    font-size: 15px;
     outline: none;
-    padding: 12px 0;
 }
 
 .wa-send-btn {
     background-color: var(--wa-brand);
-    color: #fff;
-    width: 48px;
-    height: 48px;
+    color: var(--wa-bg);
+    width: 45px;
+    height: 45px;
     border-radius: 50%;
     border: none;
     display: flex;
@@ -189,7 +173,6 @@ body.chat-body {
     align-items: center;
     cursor: pointer;
     transition: 0.2s;
-    padding-left: 4px; /* Centers the paper plane icon */
-    flex-shrink: 0;
+    padding-left: 4px; /* Optically center the paper plane */
 }
-.wa-send-btn:active { transform: scale(0.92); }
+.wa-send-btn:active { transform: scale(0.95); }
