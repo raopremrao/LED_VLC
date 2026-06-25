@@ -15,7 +15,7 @@ let rxBufferTimeout = null;
 // ==========================================
 // CHUNKING & TIME-BASED BLINDING
 // ==========================================
-const CHUNK_SIZE = 25; 
+const CHUNK_SIZE = 15; // Reduced from 25 to leave safe headroom for [EOM] tag within BLE MTU
 let txQueue = [];
 let isWaitingForAck = false;
 let ackTimeout = null; 
@@ -55,10 +55,10 @@ function handleTxAck(event) {
     if (text.includes("ACK")) {
         clearTimeout(ackTimeout); 
         
-        // Wait 300ms so the Receiver ESP32 recognizes the BLE gap
+        // Wait 150ms so the Receiver ESP32 recognizes the BLE gap
         setTimeout(() => {
             isWaitingForAck = false; 
-            lastTxTime = Date.now(); // Extend the blinding timer
+            lastTxTime = Date.now(); // Extend the blinding timer on ACK
             processTxQueue(); 
         }, 150);
     }
@@ -85,9 +85,10 @@ function handleIncomingData(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     const isChatPage = document.getElementById('chat-window') !== null;
 
-    // Suppress loopback echo: the echo always arrives within ~500ms of the last ACK.
-    // 1500ms covers it with margin, but is short enough that the other
-    // person's reply (which they type manually) will always arrive later.
+    // SMART LOOPBACK BLIND: Suppress any echo that arrives within 1500ms of our
+    // last transmission. The loopback echo (our own LED → our own photodiode) always
+    // arrives within ~850ms. The other person's reply always takes longer (human typing).
+    // TX ACKs come via charTX_Notify (handleTxAck), not here, so we never block those.
     if (Date.now() - lastTxTime < 1500) {
         chatIncomingBuffer = "";
         clearTimeout(rxBufferTimeout);
@@ -95,10 +96,10 @@ function handleIncomingData(event) {
     }
 
     if (isChatPage) {
-        if (text.startsWith("Sys:")) return;
+        if (text.startsWith("Sys:")) return; 
         
         chatIncomingBuffer += text;
-        clearTimeout(rxBufferTimeout);
+        clearTimeout(rxBufferTimeout); 
 
         if (chatIncomingBuffer.includes('[EOM]')) {
             flushRxBuffer();
@@ -110,6 +111,7 @@ function handleIncomingData(event) {
         else uiLog('RX', text, 'rx');
     }
 }
+
 function flushRxBuffer() {
     if (!chatIncomingBuffer) return;
     
@@ -227,7 +229,18 @@ function sendChatMessage() {
     const inputEl = document.getElementById('chat-input');
     const text = inputEl.value.trim();
     if (!text) return;
-    if (!charTX_Write) return alert("Please connect Transmitter (TX) first!");
+
+    // Hard block: TX is required to send anything
+    if (!charTX_Write) {
+        alert("TX not connected!\n\nTap the TX button and select your VLC_TX device first.");
+        return;
+    }
+
+    // Soft warning: RX is required to receive replies
+    if (!charRX_Read) {
+        const proceed = confirm("RX not connected — you won't see replies from the other side.\n\nConnect RX after sending, or tap Cancel to connect now.");
+        if (!proceed) return;
+    }
 
     if (queueMessage(text)) {
         renderChatBubble(text, 'sent');
@@ -250,7 +263,15 @@ function renderChatBubble(text, type) {
 
 window.onload = () => {
     const chatInput = document.getElementById('chat-input');
-    if (chatInput) chatInput.addEventListener("keypress", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); sendChatMessage(); }
-    });
+    if (chatInput) {
+        chatInput.addEventListener("keypress", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); sendChatMessage(); }
+        });
+    }
+
+    // Remind user to connect both devices on chat page
+    const statusEl = document.getElementById('wa-status-text');
+    if (statusEl) {
+        statusEl.title = "Connect TX first (your transmitter), then RX (your receiver)";
+    }
 };
