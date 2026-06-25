@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>VLC Chat</title>
     <link rel="stylesheet" href="style.css">
 </head>
@@ -11,7 +11,9 @@
 <div class="wa-app-container">
     <div class="wa-header">
         <div class="wa-header-left">
-            <a href="index.html" class="wa-back-btn">❮</a>
+            <a href="index.html" class="wa-back-btn">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"></path></svg>
+            </a>
             <div class="wa-avatar"></div>
             <div class="wa-contact-info">
                 <div class="wa-contact-name">VLC Secure Link</div>
@@ -19,8 +21,12 @@
             </div>
         </div>
         <div class="wa-header-right">
-            <button class="wa-icon-btn" onclick="connectBLE('TX')" title="Pair Transmitter">📡↑</button>
-            <button class="wa-icon-btn" onclick="connectBLE('RX')" title="Pair Receiver">📡↓</button>
+            <button class="wa-icon-btn" onclick="connectBLE('TX')" title="Pair Transmitter">
+                <span style="font-size: 12px; font-weight: bold; color: #00a884;">TX</span> 🔗
+            </button>
+            <button class="wa-icon-btn" onclick="connectBLE('RX')" title="Pair Receiver">
+                <span style="font-size: 12px; font-weight: bold; color: #00a884;">RX</span> 🔗
+            </button>
         </div>
     </div>
 
@@ -31,10 +37,12 @@
         </div>
 
     <div class="wa-footer">
-        <input type="text" id="chat-input" class="wa-input" placeholder="Type a message" autocomplete="off">
+        <div class="wa-input-wrapper">
+            <input type="text" id="chat-input" class="wa-input" placeholder="Message" autocomplete="off">
+        </div>
         <button class="wa-send-btn" onclick="sendChatMessage()">
             <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
-                <path d="M1.101 21.757 23.8 12.028 1.101 2.3l.011 7.912 13.623 1.816-13.623 1.817-.011 7.912z"></path>
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
             </svg>
         </button>
     </div>
