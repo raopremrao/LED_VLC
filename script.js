@@ -6,10 +6,10 @@ const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // ESP32 -> Br
 let deviceTX = null, charTX_Write = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
-// Chat buffer to combine characters before rendering a bubble
 let chatIncomingBuffer = "";
+let lastSentMessage = "";
+let lastSentTime = 0;
 
-// --- Shared BLE Connection Logic ---
 async function connectBLE(role) {
     try {
         uiLog(role, `Requesting BLE Device for ${role}...`, 'sys');
@@ -18,7 +18,6 @@ async function connectBLE(role) {
             optionalServices: [UART_SERVICE_UUID]
         });
 
-        uiLog(role, `Connecting to GATT Server...`, 'sys');
         const server = await device.gatt.connect();
         const service = await server.getPrimaryService(UART_SERVICE_UUID);
 
@@ -41,7 +40,6 @@ async function connectBLE(role) {
             updateConnectionUI('RX', true, device.name);
             uiLog('RX', `Connected to ${device.name}`, 'sys');
             
-            // If on dashboard, sync print mode
             if (document.getElementById('rx-mode-select')) changeRxMode(); 
         }
     } catch (error) {
@@ -61,7 +59,6 @@ function handleDisconnect(role) {
     else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
 }
 
-// --- Data Transmission ---
 async function sendMessage(text) {
     if (!text || !charTX_Write) return false;
     try {
@@ -74,35 +71,32 @@ async function sendMessage(text) {
     }
 }
 
-// --- Incoming Data Router ---
 function handleIncomingData(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
-    
-    // Check which page we are on
     const isChatPage = document.getElementById('chat-window') !== null;
 
     if (isChatPage) {
-        // CHAT MODE: Buffer characters and wait for Newline to create a bubble
-        if (text.startsWith("Sys:")) return; // Ignore system settings messages in chat
+        if (text.startsWith("Sys:")) return; 
         
         chatIncomingBuffer += text;
         if (chatIncomingBuffer.includes('\n')) {
-            renderChatBubble(chatIncomingBuffer.trim(), 'rcvd');
+            let cleanMsg = chatIncomingBuffer.trim();
+            
+            // ECHO CANCELLATION: If the incoming message matches what we just sent within the last 15 seconds, discard it.
+            if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 15000) {
+                lastSentMessage = ""; // Clear it so we don't accidentally block the next message
+            } else if (cleanMsg.length > 0) {
+                renderChatBubble(cleanMsg, 'rcvd');
+            }
             chatIncomingBuffer = "";
         }
     } else {
-        // DASHBOARD MODE: Print raw to console
         if (text.startsWith("Sys:")) uiLog('RX', text.trim(), 'sys');
         else uiLog('RX', text, 'rx');
     }
 }
 
-
-// ==========================================
-// UI HANDLING FUNCTIONS
-// ==========================================
-
-// Dashboard Tab Switcher
+// --- UI HANDLING ---
 function switchTab(tab) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -115,34 +109,26 @@ function switchTab(tab) {
     }
 }
 
-// Universal UI Updater (Works for both Dashboard and Chat pages)
 function updateConnectionUI(role, isConnected, deviceName) {
     const isChatPage = document.getElementById('chat-window') !== null;
 
     if (isChatPage) {
-        // Update Chat UI Badges
-        const badge = document.getElementById(`badge-${role.toLowerCase()}`);
-        if (isConnected) {
-            badge.classList.add('connected');
-            badge.innerText = `${role} Connected`;
-        } else {
-            badge.classList.remove('connected');
-            badge.innerText = `${role} Disconnected`;
-        }
+        // WhatsApp Style Header Updates
+        const statusText = document.getElementById('wa-status-text');
+        let txStatus = deviceTX ? '🟢' : '🔴';
+        let rxStatus = deviceRX ? '🟢' : '🔴';
+        statusText.innerText = `TX: ${txStatus} | RX: ${rxStatus}`;
     } else {
-        // Update Dashboard UI Buttons
         document.getElementById(`status-${role.toLowerCase()}`).innerText = isConnected ? `Status: Connected to ${deviceName}` : `Status: Disconnected`;
         document.getElementById(`btn-conn-${role.toLowerCase()}`).style.display = isConnected ? 'none' : 'inline-block';
         document.getElementById(`btn-disc-${role.toLowerCase()}`).style.display = isConnected ? 'inline-block' : 'none';
-        
         if (role === 'RX') document.getElementById('rx-mode-select').disabled = !isConnected;
     }
 }
 
-// Universal Logger (Routes to correct console if it exists)
 function uiLog(role, msg, type) {
     const consoleEl = document.getElementById(`console-${role.toLowerCase()}`);
-    if (!consoleEl) return; // Ignores if on Chat page
+    if (!consoleEl) return; 
     
     const time = new Date().toLocaleTimeString();
     let colorClass = 'sys';
@@ -154,11 +140,8 @@ function uiLog(role, msg, type) {
     consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
-function clearConsole(consoleId) {
-    document.getElementById(consoleId).innerHTML = '';
-}
+function clearConsole(consoleId) { document.getElementById(consoleId).innerHTML = ''; }
 
-// Dashboard Specific: Send Settings
 async function changeRxMode() {
     if (!charRX_Write) return;
     const modeCommand = document.getElementById('rx-mode-select').value + '\n';
@@ -168,7 +151,6 @@ async function changeRxMode() {
     } catch (e) { uiLog('RX', `Setting Error`, 'err'); }
 }
 
-// Dashboard Specific: Send TX Message
 async function dashboardSendMessage() {
     const inputEl = document.getElementById('tx-input');
     if (await sendMessage(inputEl.value)) {
@@ -177,18 +159,20 @@ async function dashboardSendMessage() {
     }
 }
 
-// --- CHAT UI FUNCTIONS ---
+// --- CHAT UI ENGINE ---
 async function sendChatMessage() {
     const inputEl = document.getElementById('chat-input');
     const text = inputEl.value.trim();
     if (!text) return;
 
     if (!charTX_Write) {
-        alert("Please connect to your Transmitter (TX) first!");
+        alert("Please connect your Transmitter (TX) using the top right icon!");
         return;
     }
 
     if (await sendMessage(text)) {
+        lastSentMessage = text;
+        lastSentTime = Date.now();
         renderChatBubble(text, 'sent');
         inputEl.value = '';
     }
@@ -198,17 +182,19 @@ function renderChatBubble(text, type) {
     const windowEl = document.getElementById('chat-window');
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     
-    const bubble = document.createElement('div');
-    bubble.className = `msg-bubble ${type}`;
-    bubble.innerHTML = `${text} <span class="msg-time">${time}</span>`;
+    const bubbleWrapper = document.createElement('div');
+    bubbleWrapper.className = `wa-bubble-wrapper ${type}`;
     
-    windowEl.appendChild(bubble);
+    const bubble = document.createElement('div');
+    bubble.className = `wa-bubble`;
+    bubble.innerHTML = `<span class="wa-msg-text">${text}</span><span class="wa-msg-time">${time}</span>`;
+    
+    bubbleWrapper.appendChild(bubble);
+    windowEl.appendChild(bubbleWrapper);
     windowEl.scrollTop = windowEl.scrollHeight;
 }
 
-// Setup Event Listeners on Page Load
 window.onload = () => {
-    // Detect Enter key in Chat
     const chatInput = document.getElementById('chat-input');
     if (chatInput) {
         chatInput.addEventListener("keypress", function(event) {
