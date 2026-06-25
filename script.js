@@ -2,29 +2,26 @@
 // VLC SECURE LINK - MASTER LOGIC SCRIPT
 // ==========================================
 
-// --- BLE Service UUIDs (Nordic UART) ---
 const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; 
 const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; 
 
-// --- Device State ---
 let deviceTX = null, charTX_Write = null, charTX_Notify = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
-// --- Chat Buffers ---
 let chatIncomingBuffer = "";
 let rxBufferTimeout = null; 
 
 // ==========================================
-// CHUNKING & QUEUE SYSTEM
+// CHUNKING & TIME-BASED BLINDING
 // ==========================================
 const CHUNK_SIZE = 25; 
 let txQueue = [];
 let isWaitingForAck = false;
 let ackTimeout = null; 
 
-// NEW: Tracks exactly when our transmission officially finished
-let lastTxCompleteTime = 0; 
+// SELF-HEALING MUTE: Tracks the exact millisecond of our last transmission
+let lastTxTime = 0; 
 
 async function processTxQueue() {
     if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
@@ -35,12 +32,15 @@ async function processTxQueue() {
     try {
         let encoder = new TextEncoder();
         await charTX_Write.writeValue(encoder.encode(chunk));
+        
+        lastTxTime = Date.now(); // Refresh the blinding timer
         uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
         
+        // Failsafe: If ESP32 drops the chunk, unlock after 4 seconds
         ackTimeout = setTimeout(() => {
             uiLog('TX', `Hardware ACK Timeout! Auto-recovering...`, 'err');
             isWaitingForAck = false;
-            processTxQueue();
+            processTxQueue(); 
         }, 4000);
 
     } catch (error) {
@@ -55,15 +55,11 @@ function handleTxAck(event) {
     if (text.includes("ACK")) {
         clearTimeout(ackTimeout); 
         
+        // Wait 300ms so the Receiver ESP32 recognizes the BLE gap
         setTimeout(() => {
             isWaitingForAck = false; 
-            
-            // Check if we are totally done sending
-            if (txQueue.length === 0) {
-                lastTxCompleteTime = Date.now(); // Start the 2-second blinding timer
-            } else {
-                processTxQueue(); 
-            }
+            lastTxTime = Date.now(); // Extend the blinding timer
+            processTxQueue(); 
         }, 150);
     }
 }
@@ -83,23 +79,20 @@ function queueMessage(text) {
 }
 
 // ==========================================
-// INCOMING DATA & ACTIVE BLINDING
+// INCOMING DATA PARSER
 // ==========================================
 function handleIncomingData(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
-    
-    // ---------------------------------------------------------
-    // ACTIVE BLINDING: If we are actively sending a message, OR if 
-    // we just finished sending one less than 2.5 seconds ago, we 
-    // completely destroy all incoming data to kill the physical echo.
-    // ---------------------------------------------------------
-    if (txQueue.length > 0 || isWaitingForAck || (Date.now() - lastTxCompleteTime < 2500)) {
-        chatIncomingBuffer = ""; // Flush any garbage
+    const isChatPage = document.getElementById('chat-window') !== null;
+
+    // TIME-BASED BLINDING: We instantly destroy incoming data IF we are currently
+    // transmitting, OR if we finished transmitting less than 3 seconds ago.
+    // Because it relies on time, it is physically impossible to get permanently stuck.
+    if (txQueue.length > 0 || isWaitingForAck || (Date.now() - lastTxTime < 3000)) {
+        chatIncomingBuffer = ""; 
         clearTimeout(rxBufferTimeout);
         return; 
     }
-
-    const isChatPage = document.getElementById('chat-window') !== null;
 
     if (isChatPage) {
         if (text.startsWith("Sys:")) return; 
@@ -110,7 +103,6 @@ function handleIncomingData(event) {
         if (chatIncomingBuffer.includes('[EOM]')) {
             flushRxBuffer();
         } else {
-            // Auto-flush if [EOM] is corrupted by a light glitch
             rxBufferTimeout = setTimeout(flushRxBuffer, 4000);
         }
     } else {
