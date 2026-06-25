@@ -85,14 +85,14 @@ function handleIncomingData(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     const isChatPage = document.getElementById('chat-window') !== null;
 
-    // ❌ REMOVE THIS ENTIRE BLOCK — TX and RX are separate BLE devices.
-    // ACK notifications come via charTX_Notify (handleTxAck).
-    // Decoded data comes via charRX_Read (this function). They never overlap.
-    // if (txQueue.length > 0 || isWaitingForAck || (Date.now() - lastTxTime < 3000)) {
-    //     chatIncomingBuffer = "";
-    //     clearTimeout(rxBufferTimeout);
-    //     return;
-    // }
+    // Suppress loopback echo: the echo always arrives within ~500ms of the last ACK.
+    // 1500ms covers it with margin, but is short enough that the other
+    // person's reply (which they type manually) will always arrive later.
+    if (Date.now() - lastTxTime < 1500) {
+        chatIncomingBuffer = "";
+        clearTimeout(rxBufferTimeout);
+        return;
+    }
 
     if (isChatPage) {
         if (text.startsWith("Sys:")) return;
@@ -110,7 +110,6 @@ function handleIncomingData(event) {
         else uiLog('RX', text, 'rx');
     }
 }
-
 function flushRxBuffer() {
     if (!chatIncomingBuffer) return;
     
