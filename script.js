@@ -85,20 +85,20 @@ function handleIncomingData(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     const isChatPage = document.getElementById('chat-window') !== null;
 
-    // TIME-BASED BLINDING: We instantly destroy incoming data IF we are currently
-    // transmitting, OR if we finished transmitting less than 3 seconds ago.
-    // Because it relies on time, it is physically impossible to get permanently stuck.
-    if (txQueue.length > 0 || isWaitingForAck || (Date.now() - lastTxTime < 3000)) {
-        chatIncomingBuffer = ""; 
-        clearTimeout(rxBufferTimeout);
-        return; 
-    }
+    // ❌ REMOVE THIS ENTIRE BLOCK — TX and RX are separate BLE devices.
+    // ACK notifications come via charTX_Notify (handleTxAck).
+    // Decoded data comes via charRX_Read (this function). They never overlap.
+    // if (txQueue.length > 0 || isWaitingForAck || (Date.now() - lastTxTime < 3000)) {
+    //     chatIncomingBuffer = "";
+    //     clearTimeout(rxBufferTimeout);
+    //     return;
+    // }
 
     if (isChatPage) {
-        if (text.startsWith("Sys:")) return; 
+        if (text.startsWith("Sys:")) return;
         
         chatIncomingBuffer += text;
-        clearTimeout(rxBufferTimeout); 
+        clearTimeout(rxBufferTimeout);
 
         if (chatIncomingBuffer.includes('[EOM]')) {
             flushRxBuffer();
