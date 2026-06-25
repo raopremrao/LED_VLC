@@ -1,11 +1,17 @@
-// --- BLE Service UUIDs ---
+// ==========================================
+// VLC SECURE LINK - MASTER LOGIC SCRIPT
+// ==========================================
+
+// --- BLE Service UUIDs (Nordic UART) ---
 const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // Browser -> ESP32 Write
 const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // ESP32 -> Browser Notify
 
+// --- Device State ---
 let deviceTX = null, charTX_Write = null, charTX_Notify = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
+// --- Chat Buffers & Echo Cancellation ---
 let chatIncomingBuffer = "";
 let lastSentMessage = "";
 let lastSentTime = 0;
@@ -13,10 +19,10 @@ let lastSentTime = 0;
 // ==========================================
 // CHUNKING & ROBUST QUEUE SYSTEM
 // ==========================================
-const CHUNK_SIZE = 20;
+const CHUNK_SIZE = 10; // Safe size to prevent radio starvation
 let txQueue = [];
 let isWaitingForAck = false;
-let ackTimeout = null; // New: Timer to prevent infinite freezing
+let ackTimeout = null; 
 
 async function processTxQueue() {
     if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
@@ -29,8 +35,7 @@ async function processTxQueue() {
         await charTX_Write.writeValue(encoder.encode(chunk + '\n'));
         uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
         
-        // FAILSAFE: If the ESP32 drops the chunk and never ACKs, 
-        // unlock the queue after 4 seconds to prevent permanent freezing.
+        // FAILSAFE: Unlock the queue if ESP32 drops the packet
         ackTimeout = setTimeout(() => {
             uiLog('TX', `Hardware ACK Timeout! Auto-recovering queue...`, 'err');
             isWaitingForAck = false;
@@ -47,18 +52,73 @@ async function processTxQueue() {
 function handleTxAck(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     if (text.includes("ACK")) {
-        clearTimeout(ackTimeout); // Clear the failsafe timer
+        clearTimeout(ackTimeout); 
         
-        // RACE CONDITION FIX: Give the ESP32 150ms to finish its internal 
-        // C++ loop before we hammer it with the next chunk of data.
+        // RACE CONDITION FIX: Give the ESP32 150ms to breathe
         setTimeout(() => {
             isWaitingForAck = false; 
             processTxQueue(); 
         }, 150);
     }
 }
-// ==========================================
 
+function queueMessage(text) {
+    if (!text || !charTX_Write) return false;
+    
+    // Slice the message and inject the End of Message [EOM] token
+    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+        let isLastChunk = (i + CHUNK_SIZE >= text.length);
+        let chunk = text.slice(i, i + CHUNK_SIZE);
+        
+        if (isLastChunk) {
+            chunk += "[EOM]";
+        }
+        
+        txQueue.push(chunk);
+    }
+    
+    processTxQueue();
+    return true;
+}
+
+// ==========================================
+// INCOMING DATA PARSER
+// ==========================================
+function handleIncomingData(event) {
+    let text = new TextDecoder('utf-8').decode(event.target.value);
+    const isChatPage = document.getElementById('chat-window') !== null;
+
+    if (isChatPage) {
+        if (text.startsWith("Sys:")) return; 
+        
+        chatIncomingBuffer += text;
+        
+        // Wait until we see the [EOM] token to draw the bubble
+        if (chatIncomingBuffer.includes('[EOM]')) {
+            
+            // Clean the token and stray newlines out of the final text
+            let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
+            
+            // Echo cancellation: Ignore if it perfectly matches what we just sent
+            if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 15000) {
+                lastSentMessage = ""; 
+            } else if (cleanMsg.length > 0) {
+                renderChatBubble(cleanMsg, 'rcvd');
+            }
+            
+            // Flush buffer for the next message
+            chatIncomingBuffer = "";
+        }
+    } else {
+        // Dashboard Console Output
+        if (text.startsWith("Sys:")) uiLog('RX', text.trim(), 'sys');
+        else uiLog('RX', text, 'rx');
+    }
+}
+
+// ==========================================
+// BLE CONNECTION MANAGEMENT
+// ==========================================
 async function connectBLE(role) {
     try {
         uiLog(role, `Requesting BLE Device for ${role}...`, 'sys');
@@ -74,6 +134,7 @@ async function connectBLE(role) {
             deviceTX = device;
             charTX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
             
+            // Listen for ACKs
             charTX_Notify = await service.getCharacteristic(UART_RX_CHAR_UUID);
             await charTX_Notify.startNotifications();
             charTX_Notify.addEventListener('characteristicvaluechanged', handleTxAck);
@@ -116,60 +177,9 @@ function handleDisconnect(role) {
     else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
 }
 
-function queueMessage(text) {
-    if (!text || !charTX_Write) return false;
-    
-    // Slice the message into 10-character chunks
-    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-        let isLastChunk = (i + CHUNK_SIZE >= text.length);
-        let chunk = text.slice(i, i + CHUNK_SIZE);
-        
-        // Append the hidden [EOM] token to the very last chunk
-        if (isLastChunk) {
-            chunk += "[EOM]";
-        }
-        
-        txQueue.push(chunk);
-    }
-    
-    processTxQueue();
-    return true;
-}
-
-function handleIncomingData(event) {
-    let text = new TextDecoder('utf-8').decode(event.target.value);
-    const isChatPage = document.getElementById('chat-window') !== null;
-
-    if (isChatPage) {
-        if (text.startsWith("Sys:")) return; 
-        
-        // Quietly add the incoming chunk to the hidden buffer
-        chatIncomingBuffer += text;
-        
-        // ONLY draw the bubble if the buffer contains the [EOM] token
-        if (chatIncomingBuffer.includes('[EOM]')) {
-            
-            // Clean up the text: remove the token and strip any accidental newlines
-            let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
-            
-            // Echo cancellation
-            if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 15000) {
-                lastSentMessage = ""; 
-            } else if (cleanMsg.length > 0) {
-                renderChatBubble(cleanMsg, 'rcvd');
-            }
-            
-            // Clear the buffer for the next message
-            chatIncomingBuffer = "";
-        }
-    } else {
-        // Keep the Dashboard console behaving normally
-        if (text.startsWith("Sys:")) uiLog('RX', text.trim(), 'sys');
-        else uiLog('RX', text, 'rx');
-    }
-}
-
-// --- UI HANDLING ---
+// ==========================================
+// UI HANDLING (DASHBOARD & CHAT)
+// ==========================================
 function switchTab(tab) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -228,7 +238,9 @@ function dashboardSendMessage() {
     }
 }
 
-// --- CHAT UI ENGINE ---
+// ==========================================
+// CHAT UI RENDERING ENGINE
+// ==========================================
 function sendChatMessage() {
     const inputEl = document.getElementById('chat-input');
     const text = inputEl.value.trim();
@@ -250,16 +262,20 @@ function sendChatMessage() {
 function renderChatBubble(text, type) {
     const windowEl = document.getElementById('chat-window');
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    
     const bubbleWrapper = document.createElement('div');
     bubbleWrapper.className = `wa-bubble-wrapper ${type}`;
+    
     const bubble = document.createElement('div');
     bubble.className = `wa-bubble`;
     bubble.innerHTML = `<span class="wa-msg-text">${text}</span><span class="wa-msg-time">${time}</span>`;
+    
     bubbleWrapper.appendChild(bubble);
     windowEl.appendChild(bubbleWrapper);
     windowEl.scrollTop = windowEl.scrollHeight;
 }
 
+// Add event listener for Enter key in Chat Input
 window.onload = () => {
     const chatInput = document.getElementById('chat-input');
     if (chatInput) {
