@@ -13,7 +13,7 @@ let lastSentTime = 0;
 // ==========================================
 // CHUNKING & ROBUST QUEUE SYSTEM
 // ==========================================
-const CHUNK_SIZE = 10;
+const CHUNK_SIZE = 20;
 let txQueue = [];
 let isWaitingForAck = false;
 let ackTimeout = null; // New: Timer to prevent infinite freezing
