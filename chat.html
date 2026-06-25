@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLC Chat Link</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="container">
+    <div class="header-nav">
+        <h1>VLC Chat Link</h1>
+        <a href="index.html" class="nav-link">⬅ Back to Dashboard</a>
+    </div>
+
+    <div class="chat-container">
+        <div class="chat-header">
+            <div>
+                <button class="btn" style="margin:0; padding:5px 10px; font-size:12px;" onclick="connectBLE('TX')">Pair TX 🔵</button>
+                <button class="btn" style="margin:0; padding:5px 10px; font-size:12px;" onclick="connectBLE('RX')">Pair RX 🟢</button>
+            </div>
+            <div class="chat-status-badges">
+                <span id="badge-tx" class="badge">TX Disconnected</span>
+                <span id="badge-rx" class="badge">RX Disconnected</span>
+            </div>
+        </div>
+
+        <div class="chat-window" id="chat-window">
+            <div style="text-align:center; color:#555; font-size:12px; margin-top:20px;">
+                End-to-End Optical Encryption via Visible Light<br>
+                Please connect both TX and RX to begin.
+            </div>
+            </div>
+
+        <div class="chat-input-area">
+            <input type="text" id="chat-input" placeholder="Type a message..." autocomplete="off">
+            <button class="btn" onclick="sendChatMessage()">Send</button>
+        </div>
+    </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
