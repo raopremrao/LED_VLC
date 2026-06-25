@@ -12,7 +12,7 @@ let lastSentTime = 0;
 let rxBufferTimeout = null; 
 
 // --- CHUNKING QUEUE ---
-const CHUNK_SIZE = 50; 
+const CHUNK_SIZE = 25; 
 let txQueue = [];
 let isWaitingForAck = false;
 let ackTimeout = null; 
