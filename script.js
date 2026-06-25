@@ -13,7 +13,7 @@ let lastSentTime = 0;
 // ==========================================
 // NEW: CHUNKING & QUEUE SYSTEM
 // ==========================================
-const CHUNK_SIZE = 10;
+const CHUNK_SIZE = 50;
 let txQueue = [];
 let isWaitingForAck = false;
 
