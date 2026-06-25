@@ -1,28 +1,21 @@
-// ==========================================
-// VLC SECURE LINK - MASTER LOGIC SCRIPT
-// ==========================================
-
-// --- BLE Service UUIDs (Nordic UART) ---
+// --- BLE Service UUIDs ---
 const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // Browser -> ESP32 Write
-const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // ESP32 -> Browser Notify
+const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; 
+const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; 
 
-// --- Device State ---
 let deviceTX = null, charTX_Write = null, charTX_Notify = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
-// --- Chat Buffers & Timeouts ---
 let chatIncomingBuffer = "";
+let lastSentMessage = "";
+let lastSentTime = 0;
 let rxBufferTimeout = null; 
 
-// ==========================================
-// CHUNKING & ROBUST QUEUE SYSTEM
-// ==========================================
+// --- CHUNKING QUEUE ---
 const CHUNK_SIZE = 50; 
 let txQueue = [];
 let isWaitingForAck = false;
 let ackTimeout = null; 
-let lastTxTime = 0; // MASTER MUTE TIMER
 
 async function processTxQueue() {
     if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
@@ -31,12 +24,11 @@ async function processTxQueue() {
     let chunk = txQueue.shift(); 
     
     try {
-        lastTxTime = Date.now(); // Start the Mute timer
         let encoder = new TextEncoder();
-        await charTX_Write.writeValue(encoder.encode(chunk + '\n'));
+        // BUG FIX: Removed the + '\n' that was corrupting chunks
+        await charTX_Write.writeValue(encoder.encode(chunk));
         uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
         
-        // FAILSAFE 1: Unlock queue if ESP32 drops the packet
         ackTimeout = setTimeout(() => {
             uiLog('TX', `Hardware ACK Timeout! Auto-recovering...`, 'err');
             isWaitingForAck = false;
@@ -54,9 +46,6 @@ function handleTxAck(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     if (text.includes("ACK")) {
         clearTimeout(ackTimeout); 
-        lastTxTime = Date.now(); // Refresh Mute timer on ACK
-        
-        // RACE CONDITION FIX: Give ESP32 150ms to breathe
         setTimeout(() => {
             isWaitingForAck = false; 
             processTxQueue(); 
@@ -67,45 +56,31 @@ function handleTxAck(event) {
 function queueMessage(text) {
     if (!text || !charTX_Write) return false;
     
-    // Slice message and inject the [EOM] token at the very end
     for (let i = 0; i < text.length; i += CHUNK_SIZE) {
         let isLastChunk = (i + CHUNK_SIZE >= text.length);
         let chunk = text.slice(i, i + CHUNK_SIZE);
         if (isLastChunk) chunk += "[EOM]";
         txQueue.push(chunk);
     }
-    
     processTxQueue();
     return true;
 }
 
-// ==========================================
-// INCOMING DATA PARSER & MASTER MUTE
-// ==========================================
+// --- INCOMING DATA & ECHO CANCELLATION ---
 function handleIncomingData(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     const isChatPage = document.getElementById('chat-window') !== null;
-
-    // ---------------------------------------------------------
-    // MASTER MUTE: Completely blind the browser to incoming data
-    // if the Queue is active, or if we sent a chunk within the last 
-    // 2500ms. This permanently destroys the physical loopback echo.
-    // ---------------------------------------------------------
-    if (isWaitingForAck || txQueue.length > 0 || (Date.now() - lastTxTime < 2500)) {
-        return; 
-    }
 
     if (isChatPage) {
         if (text.startsWith("Sys:")) return; 
         
         chatIncomingBuffer += text;
-        clearTimeout(rxBufferTimeout); // Reset failsafe timer
+        clearTimeout(rxBufferTimeout); 
 
         if (chatIncomingBuffer.includes('[EOM]')) {
             flushRxBuffer();
         } else {
-            // FAILSAFE 2: If the [EOM] token is corrupted by an optical glitch,
-            // force flush whatever text we received after 4 seconds of silence.
+            // Failsafe: auto-flush if EOM is dropped by a light glitch
             rxBufferTimeout = setTimeout(flushRxBuffer, 4000);
         }
     } else {
@@ -117,17 +92,22 @@ function handleIncomingData(event) {
 function flushRxBuffer() {
     if (!chatIncomingBuffer) return;
     
-    // Clean up the text: strip tokens and stray newlines
     let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
-    if (cleanMsg.length > 0) {
+    
+    // BULLETPROOF ECHO CANCELLATION: Strip all spaces before comparing
+    let normalizedIncoming = cleanMsg.replace(/\s+/g, '');
+    let normalizedSent = lastSentMessage.replace(/\s+/g, '');
+    
+    if (normalizedIncoming === normalizedSent && (Date.now() - lastSentTime) < 20000) {
+        lastSentMessage = ""; // Success! We muted our own echo.
+    } else if (cleanMsg.length > 0) {
         renderChatBubble(cleanMsg, 'rcvd');
     }
-    chatIncomingBuffer = ""; // Reset for next message
+    
+    chatIncomingBuffer = ""; 
 }
 
-// ==========================================
-// BLE CONNECTION MANAGEMENT
-// ==========================================
+// --- UI & BLE LOGIC ---
 async function connectBLE(role) {
     try {
         uiLog(role, `Requesting BLE Device for ${role}...`, 'sys');
@@ -142,32 +122,25 @@ async function connectBLE(role) {
         if (role === 'TX') {
             deviceTX = device;
             charTX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
-            
             charTX_Notify = await service.getCharacteristic(UART_RX_CHAR_UUID);
             await charTX_Notify.startNotifications();
             charTX_Notify.addEventListener('characteristicvaluechanged', handleTxAck);
 
             deviceTX.addEventListener('gattserverdisconnected', () => handleDisconnect('TX'));
             updateConnectionUI('TX', true, device.name);
-            uiLog('TX', `Connected to ${device.name}`, 'sys');
         } 
         else if (role === 'RX') {
             deviceRX = device;
             charRX_Read = await service.getCharacteristic(UART_RX_CHAR_UUID);
             charRX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
-            
             await charRX_Read.startNotifications();
             charRX_Read.addEventListener('characteristicvaluechanged', handleIncomingData);
             deviceRX.addEventListener('gattserverdisconnected', () => handleDisconnect('RX'));
 
             updateConnectionUI('RX', true, device.name);
-            uiLog('RX', `Connected to ${device.name}`, 'sys');
-            
             if (document.getElementById('rx-mode-select')) changeRxMode(); 
         }
-    } catch (error) {
-        uiLog(role, `Connection failed: ${error}`, 'err');
-    }
+    } catch (e) { uiLog(role, `Connection failed: ${e}`, 'err'); }
 }
 
 function disconnectBLE(role) {
@@ -177,17 +150,12 @@ function disconnectBLE(role) {
 
 function handleDisconnect(role) {
     updateConnectionUI(role, false, "");
-    uiLog(role, `Device disconnected.`, 'err');
     if (role === 'TX') { 
         deviceTX = null; charTX_Write = null; charTX_Notify = null; 
         txQueue = []; isWaitingForAck = false; clearTimeout(ackTimeout);
-    } 
-    else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
+    } else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
 }
 
-// ==========================================
-// UI HANDLING (DASHBOARD & CHAT)
-// ==========================================
 function switchTab(tab) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -203,12 +171,9 @@ function switchTab(tab) {
 function updateConnectionUI(role, isConnected, deviceName) {
     const isChatPage = document.getElementById('chat-window') !== null;
     if (isChatPage) {
-        const statusText = document.getElementById('wa-status-text');
-        let txStatus = deviceTX ? '🟢' : '🔴';
-        let rxStatus = deviceRX ? '🟢' : '🔴';
-        statusText.innerText = `TX: ${txStatus} | RX: ${rxStatus}`;
+        document.getElementById('wa-status-text').innerText = `TX: ${deviceTX ? '🟢' : '🔴'} | RX: ${deviceRX ? '🟢' : '🔴'}`;
     } else {
-        document.getElementById(`status-${role.toLowerCase()}`).innerText = isConnected ? `Status: Connected to ${deviceName}` : `Status: Disconnected`;
+        document.getElementById(`status-${role.toLowerCase()}`).innerText = isConnected ? `Status: Connected` : `Status: Disconnected`;
         document.getElementById(`btn-conn-${role.toLowerCase()}`).style.display = isConnected ? 'none' : 'inline-block';
         document.getElementById(`btn-disc-${role.toLowerCase()}`).style.display = isConnected ? 'inline-block' : 'none';
         if (role === 'RX') document.getElementById('rx-mode-select').disabled = !isConnected;
@@ -218,12 +183,8 @@ function updateConnectionUI(role, isConnected, deviceName) {
 function uiLog(role, msg, type) {
     const consoleEl = document.getElementById(`console-${role.toLowerCase()}`);
     if (!consoleEl) return; 
-    const time = new Date().toLocaleTimeString();
-    let colorClass = 'sys';
-    if (type === 'tx') colorClass = 'tx';
-    if (type === 'rx') colorClass = 'rx';
-    if (type === 'err') colorClass = 'err';
-    consoleEl.innerHTML += `<div><span style="color:#555">[${time}]</span> <span class="${colorClass}">${msg}</span></div>`;
+    let colorClass = type === 'tx' ? 'tx' : (type === 'rx' ? 'rx' : (type === 'err' ? 'err' : 'sys'));
+    consoleEl.innerHTML += `<div><span style="color:#555">[${new Date().toLocaleTimeString()}]</span> <span class="${colorClass}">${msg}</span></div>`;
     consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
@@ -234,32 +195,23 @@ async function changeRxMode() {
     const modeCommand = document.getElementById('rx-mode-select').value + '\n';
     try {
         await charRX_Write.writeValue(new TextEncoder().encode(modeCommand));
-        uiLog('RX', `Sending setting -> ${modeCommand.trim()}`, 'sys');
-    } catch (e) { uiLog('RX', `Setting Error`, 'err'); }
+    } catch (e) {}
 }
 
 function dashboardSendMessage() {
     const inputEl = document.getElementById('tx-input');
-    if (queueMessage(inputEl.value)) {
-        uiLog('TX', `Queued: ${inputEl.value.trim()}`, 'tx');
-        inputEl.value = ''; 
-    }
+    if (queueMessage(inputEl.value)) inputEl.value = ''; 
 }
 
-// ==========================================
-// CHAT UI RENDERING ENGINE
-// ==========================================
 function sendChatMessage() {
     const inputEl = document.getElementById('chat-input');
     const text = inputEl.value.trim();
     if (!text) return;
-
-    if (!charTX_Write) {
-        alert("Please connect your Transmitter (TX) using the top right icon!");
-        return;
-    }
+    if (!charTX_Write) return alert("Please connect Transmitter (TX) first!");
 
     if (queueMessage(text)) {
+        lastSentMessage = text;
+        lastSentTime = Date.now();
         renderChatBubble(text, 'sent');
         inputEl.value = '';
     }
@@ -268,28 +220,19 @@ function sendChatMessage() {
 function renderChatBubble(text, type) {
     const windowEl = document.getElementById('chat-window');
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    
     const bubbleWrapper = document.createElement('div');
     bubbleWrapper.className = `wa-bubble-wrapper ${type}`;
-    
     const bubble = document.createElement('div');
     bubble.className = `wa-bubble`;
     bubble.innerHTML = `<span class="wa-msg-text">${text}</span><span class="wa-msg-time">${time}</span>`;
-    
     bubbleWrapper.appendChild(bubble);
     windowEl.appendChild(bubbleWrapper);
     windowEl.scrollTop = windowEl.scrollHeight;
 }
 
-// Detect Enter key
 window.onload = () => {
     const chatInput = document.getElementById('chat-input');
-    if (chatInput) {
-        chatInput.addEventListener("keypress", function(event) {
-            if (event.key === "Enter") {
-                event.preventDefault();
-                sendChatMessage();
-            }
-        });
-    }
+    if (chatInput) chatInput.addEventListener("keypress", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); sendChatMessage(); }
+    });
 };
