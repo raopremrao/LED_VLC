@@ -13,16 +13,39 @@ let chatIncomingBuffer = "";
 let rxBufferTimeout = null; 
 
 // ==========================================
-// CHUNKING & TIME-BASED BLINDING
+// CHUNKING
 // ==========================================
-const CHUNK_SIZE = 15; // Reduced from 25 to leave safe headroom for [EOM] tag within BLE MTU
+const CHUNK_SIZE = 15; // Safe headroom for [EOM] within BLE 20-byte MTU
 let txQueue = [];
 let isWaitingForAck = false;
 let ackTimeout = null; 
 
-// SELF-HEALING MUTE: Tracks the exact millisecond of our last transmission
-let lastTxTime = 0; 
+// ==========================================
+// FLAG-BASED LOOPBACK BLIND
+// Only active while the TX ESP32 is physically flashing the LED.
+// Timeline: first BLE write → each ACK resets the 600ms countdown → blind off.
+// 600ms covers the echo path: 250ms RX idle + 50ms BLE + 300ms safety margin.
+// This is never triggered by the OTHER person's reply, only our own echo.
+// ==========================================
+let txBlindActive = false;
+let txBlindTimer = null;
 
+function startTxBlind() {
+    txBlindActive = true;
+    clearTimeout(txBlindTimer);
+}
+
+function extendTxBlind() {
+    // Called after each ACK. Blind deactivates 600ms after the LAST ACK.
+    clearTimeout(txBlindTimer);
+    txBlindTimer = setTimeout(() => {
+        txBlindActive = false;
+    }, 600);
+}
+
+// ==========================================
+// TX QUEUE & ACK HANDLING
+// ==========================================
 async function processTxQueue() {
     if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
     
@@ -33,12 +56,13 @@ async function processTxQueue() {
         let encoder = new TextEncoder();
         await charTX_Write.writeValue(encoder.encode(chunk));
         
-        lastTxTime = Date.now(); // Refresh the blinding timer
+        startTxBlind(); // Blind ON — ESP32 is now flashing
         uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
         
-        // Failsafe: If ESP32 drops the chunk, unlock after 4 seconds
+        // Failsafe: if ESP32 drops the ACK, auto-recover after 4 seconds
         ackTimeout = setTimeout(() => {
             uiLog('TX', `Hardware ACK Timeout! Auto-recovering...`, 'err');
+            extendTxBlind(); // Still extend blind on timeout
             isWaitingForAck = false;
             processTxQueue(); 
         }, 4000);
@@ -54,11 +78,10 @@ function handleTxAck(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     if (text.includes("ACK")) {
         clearTimeout(ackTimeout); 
-        
-        // Wait 150ms so the Receiver ESP32 recognizes the BLE gap
+        extendTxBlind(); // Reset the 600ms countdown from this ACK
+
         setTimeout(() => {
             isWaitingForAck = false; 
-            lastTxTime = Date.now(); // Extend the blinding timer on ACK
             processTxQueue(); 
         }, 150);
     }
@@ -85,11 +108,11 @@ function handleIncomingData(event) {
     let text = new TextDecoder('utf-8').decode(event.target.value);
     const isChatPage = document.getElementById('chat-window') !== null;
 
-    // SMART LOOPBACK BLIND: Suppress any echo that arrives within 1500ms of our
-    // last transmission. The loopback echo (our own LED → our own photodiode) always
-    // arrives within ~850ms. The other person's reply always takes longer (human typing).
-    // TX ACKs come via charTX_Notify (handleTxAck), not here, so we never block those.
-    if (Date.now() - lastTxTime < 1500) {
+    // LOOPBACK BLIND: Discard data only while WE are actively transmitting.
+    // txBlindActive is true from first BLE write until 600ms after the last ACK.
+    // The other person's reply always arrives AFTER they type it (seconds later),
+    // so it is never caught by this flag.
+    if (txBlindActive) {
         chatIncomingBuffer = "";
         clearTimeout(rxBufferTimeout);
         return;
@@ -101,9 +124,12 @@ function handleIncomingData(event) {
         chatIncomingBuffer += text;
         clearTimeout(rxBufferTimeout); 
 
+        // [EOM] is embedded in the VLC data by the sender's JS, so the RX ESP32
+        // decodes and forwards it verbatim — detect it for instant flush.
         if (chatIncomingBuffer.includes('[EOM]')) {
             flushRxBuffer();
         } else {
+            // Fallback: flush after 4 seconds of silence
             rxBufferTimeout = setTimeout(flushRxBuffer, 4000);
         }
     } else {
@@ -172,7 +198,12 @@ function handleDisconnect(role) {
     if (role === 'TX') { 
         deviceTX = null; charTX_Write = null; charTX_Notify = null; 
         txQueue = []; isWaitingForAck = false; clearTimeout(ackTimeout);
-    } else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
+        // Clear blind state on TX disconnect
+        txBlindActive = false;
+        clearTimeout(txBlindTimer);
+    } else { 
+        deviceRX = null; charRX_Read = null; charRX_Write = null; 
+    }
 }
 
 // ==========================================
@@ -269,7 +300,6 @@ window.onload = () => {
         });
     }
 
-    // Remind user to connect both devices on chat page
     const statusEl = document.getElementById('wa-status-text');
     if (statusEl) {
         statusEl.title = "Connect TX first (your transmitter), then RX (your receiver)";
