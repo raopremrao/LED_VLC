@@ -31,14 +31,19 @@
         </div>
 
     <div class="wa-footer">
+        <input type="file" id="image-input" accept="image/*" style="display: none;" onchange="sendImage()">
+        
+        <button class="wa-icon-btn" onclick="document.getElementById('image-input').click()" title="Send Image" style="background: none; border: none; font-size: 24px; cursor: pointer; padding-right: 10px;">
+            📷
+        </button>
+
         <input type="text" id="chat-input" class="wa-input" placeholder="Type a message" autocomplete="off">
+        
         <button class="wa-send-btn" onclick="sendChatMessage()">
             <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
                 <path d="M1.101 21.757 23.8 12.028 1.101 2.3l.011 7.912 13.623 1.816-13.623 1.817-.011 7.912z"></path>
             </svg>
         </button>
-        <input type="file" id="image-input" accept="image/*" style="display: none;" onchange="sendImage()">
-        <button onclick="document.getElementById('image-input').click()">📷 Send Image</button>
     </div>
 </div>
 

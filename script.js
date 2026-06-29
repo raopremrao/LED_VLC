@@ -1,20 +1,26 @@
 // ==========================================
 // VLC SECURE LINK - MASTER LOGIC SCRIPT
-// (Includes Image Streaming & Base64 Downscaling)
+// (Includes Async Streaming, Image Transfer & Full BLE Logic)
 // ==========================================
 
+// --- BLE Service UUIDs (Nordic UART) ---
 const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; 
 const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; 
 
+// --- Device State ---
 let deviceTX = null, charTX_Write = null, charTX_Notify = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
+// --- Chat Buffers & Echo Cancellation ---
 let chatIncomingBuffer = "";
 let lastSentMessage = "";
 let lastSentTime = 0;
-let isSendingImage = false; // Flag to help echo cancellation
+let isSendingImage = false;
 
+// ==========================================
+// FUZZY MATCHING (LEVENSHTEIN DISTANCE)
+// ==========================================
 function calculateSimilarity(a, b) {
     if (a.length === 0) return b.length;
     if (b.length === 0) return a.length;
@@ -53,9 +59,6 @@ function sendImage() {
         const img = new Image();
         img.onload = function() {
             const canvas = document.createElement('canvas');
-            
-            // CRITICAL: Max width/height of 64 pixels. 
-            // Any larger and the VLC transfer will take over 5 minutes.
             const MAX_SIZE = 64; 
             let width = img.width;
             let height = img.height;
@@ -77,16 +80,13 @@ function sendImage() {
             const ctx = canvas.getContext('2d');
             ctx.drawImage(img, 0, 0, width, height);
 
-            // Compress to JPEG at 40% quality to save bytes
             const dataUrl = canvas.toDataURL('image/jpeg', 0.4); 
-            
-            // Wrap in tokens so the receiver knows it's an image
             let payload = "[IMG_START]" + dataUrl + "[IMG_END]";
             
             isSendingImage = true;
             lastSentTime = Date.now();
             
-            uiLog('TX', `Image compressed to ${payload.length} bytes. Streaming...`, 'tx');
+            uiLog('TX', `Image compressed. Streaming...`, 'tx');
 
             queueMessage(payload).then(() => {
                 renderChatBubble(dataUrl, 'sent', true);
@@ -106,10 +106,8 @@ async function queueMessage(fullMsg) {
     
     let encoder = new TextEncoder();
     
-    // Stream in 100-character blocks
     for (let i = 0; i < fullMsg.length; i += 100) {
         let chunk = fullMsg.slice(i, i + 100);
-        
         try {
             await charTX_Write.writeValue(encoder.encode(chunk + '\n'));
             await new Promise(r => setTimeout(r, 50)); 
@@ -155,10 +153,7 @@ function handleIncomingData(event) {
                 let endIndex = chatIncomingBuffer.indexOf('[IMG_END]');
                 let base64Data = chatIncomingBuffer.substring(startIndex, endIndex).replace(/\n/g, '').trim();
                 
-                // Echo Cancellation for Images: Images take a long time to send.
-                // If we sent an image in the last 2 minutes, assume this massive block of text is our own echo.
                 if (isSendingImage && (Date.now() - lastSentTime) < 120000) {
-                    uiLog('SYS', `Suppressed image echo.`, 'sys');
                     isSendingImage = false;
                 } else if (base64Data.length > 0) {
                     renderChatBubble(base64Data, 'rcvd', true);
@@ -173,6 +168,129 @@ function handleIncomingData(event) {
         if (text.startsWith("Sys:")) uiLog('RX', text.trim(), 'sys');
         else uiLog('RX', text, 'rx');
     }
+}
+
+// ==========================================
+// BLE CONNECTION MANAGEMENT
+// ==========================================
+async function connectBLE(role) {
+    if (!navigator.bluetooth) {
+        alert("ERROR: Your browser does not support Web Bluetooth. (iPhones block this feature entirely. Use Chrome/Edge on Android or PC).");
+        return;
+    }
+
+    try {
+        uiLog(role, `Requesting BLE Device for ${role}...`, 'sys');
+        const device = await navigator.bluetooth.requestDevice({
+            filters: [{ namePrefix: 'VLC_' }], 
+            optionalServices: [UART_SERVICE_UUID]
+        });
+
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(UART_SERVICE_UUID);
+
+        if (role === 'TX') {
+            deviceTX = device;
+            charTX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
+            
+            deviceTX.addEventListener('gattserverdisconnected', () => handleDisconnect('TX'));
+            updateConnectionUI('TX', true, device.name);
+            uiLog('TX', `Connected to ${device.name}`, 'sys');
+        } 
+        else if (role === 'RX') {
+            deviceRX = device;
+            charRX_Read = await service.getCharacteristic(UART_RX_CHAR_UUID);
+            charRX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
+            
+            await charRX_Read.startNotifications();
+            charRX_Read.addEventListener('characteristicvaluechanged', handleIncomingData);
+            deviceRX.addEventListener('gattserverdisconnected', () => handleDisconnect('RX'));
+
+            updateConnectionUI('RX', true, device.name);
+            uiLog('RX', `Connected to ${device.name}`, 'sys');
+            
+            if (document.getElementById('rx-mode-select')) changeRxMode(); 
+        }
+    } catch (error) {
+        alert(`Connection Failed:\n${error.message}`);
+        uiLog(role, `Connection failed: ${error}`, 'err');
+    }
+}
+
+function disconnectBLE(role) {
+    if (role === 'TX' && deviceTX) deviceTX.gatt.disconnect();
+    else if (role === 'RX' && deviceRX) deviceRX.gatt.disconnect();
+}
+
+function handleDisconnect(role) {
+    updateConnectionUI(role, false, "");
+    uiLog(role, `Device disconnected.`, 'err');
+    if (role === 'TX') { 
+        deviceTX = null; charTX_Write = null; 
+    } 
+    else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
+}
+
+// ==========================================
+// UI HANDLING (DASHBOARD & CHAT)
+// ==========================================
+function switchTab(tab) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    if(tab === 'tx') {
+        document.getElementById('tab-tx').classList.add('active');
+        document.getElementById('panel-tx').classList.add('active');
+    } else {
+        document.getElementById('tab-rx').classList.add('active');
+        document.getElementById('panel-rx').classList.add('active');
+    }
+}
+
+function updateConnectionUI(role, isConnected, deviceName) {
+    const isChatPage = document.getElementById('chat-window') !== null;
+    if (isChatPage) {
+        const statusText = document.getElementById('wa-status-text');
+        let txStatus = deviceTX ? '🟢' : '🔴';
+        let rxStatus = deviceRX ? '🟢' : '🔴';
+        statusText.innerText = `TX: ${txStatus} | RX: ${rxStatus}`;
+    } else {
+        document.getElementById(`status-${role.toLowerCase()}`).innerText = isConnected ? `Status: Connected to ${deviceName}` : `Status: Disconnected`;
+        document.getElementById(`btn-conn-${role.toLowerCase()}`).style.display = isConnected ? 'none' : 'inline-block';
+        document.getElementById(`btn-disc-${role.toLowerCase()}`).style.display = isConnected ? 'inline-block' : 'none';
+        if (role === 'RX') document.getElementById('rx-mode-select').disabled = !isConnected;
+    }
+}
+
+function uiLog(role, msg, type) {
+    const consoleEl = document.getElementById(`console-${role.toLowerCase()}`);
+    if (!consoleEl) return; 
+    const time = new Date().toLocaleTimeString();
+    let colorClass = 'sys';
+    if (type === 'tx') colorClass = 'tx';
+    if (type === 'rx') colorClass = 'rx';
+    if (type === 'err') colorClass = 'err';
+    consoleEl.innerHTML += `<div><span style="color:#555">[${time}]</span> <span class="${colorClass}">${msg}</span></div>`;
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+
+function clearConsole(consoleId) { document.getElementById(consoleId).innerHTML = ''; }
+
+async function changeRxMode() {
+    if (!charRX_Write) return;
+    const modeCommand = document.getElementById('rx-mode-select').value + '\n';
+    try {
+        await charRX_Write.writeValue(new TextEncoder().encode(modeCommand));
+        uiLog('RX', `Sending setting -> ${modeCommand.trim()}`, 'sys');
+    } catch (e) { uiLog('RX', `Setting Error`, 'err'); }
+}
+
+function dashboardSendMessage() {
+    const inputEl = document.getElementById('tx-input');
+    let payload = inputEl.value.trim() + "[EOM]";
+    queueMessage(payload).then(() => {
+        uiLog('TX', `Queued: ${inputEl.value.trim()}`, 'tx');
+        inputEl.value = ''; 
+    });
 }
 
 // ==========================================
@@ -209,7 +327,6 @@ function renderChatBubble(content, type, isImage) {
     bubble.className = `wa-bubble`;
     
     if (isImage) {
-        // Render an HTML image tag using the Base64 string
         bubble.innerHTML = `<img src="${content}" style="max-width: 150px; border-radius: 8px;" alt="VLC Image"/><span class="wa-msg-time">${time}</span>`;
     } else {
         bubble.innerHTML = `<span class="wa-msg-text">${content}</span><span class="wa-msg-time">${time}</span>`;
@@ -220,17 +337,7 @@ function renderChatBubble(content, type, isImage) {
     windowEl.scrollTop = windowEl.scrollHeight;
 }
 
-// Standard BLE setup & UI functions remain the same below...
-async function connectBLE(role) { /* ... unchanged ... */ }
-function disconnectBLE(role) { /* ... unchanged ... */ }
-function handleDisconnect(role) { /* ... unchanged ... */ }
-function switchTab(tab) { /* ... unchanged ... */ }
-function updateConnectionUI(role, isConnected, deviceName) { /* ... unchanged ... */ }
-function uiLog(role, msg, type) { /* ... unchanged ... */ }
-function clearConsole(consoleId) { document.getElementById(consoleId).innerHTML = ''; }
-async function changeRxMode() { /* ... unchanged ... */ }
-function dashboardSendMessage() { /* ... unchanged ... */ }
-
+// Add event listener for Enter key in Chat Input
 window.onload = () => {
     const chatInput = document.getElementById('chat-input');
     if (chatInput) {
