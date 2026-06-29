@@ -19,7 +19,7 @@ let lastSentTime = 0;
 // ==========================================
 // CHUNKING & ROBUST QUEUE SYSTEM
 // ==========================================
-const CHUNK_SIZE = 80; // Safe size to prevent radio starvation
+const CHUNK_SIZE = 90; // Safe size to prevent radio starvation
 let txQueue = [];
 let isWaitingForAck = false;
 let ackTimeout = null; 
@@ -58,7 +58,7 @@ function handleTxAck(event) {
         setTimeout(() => {
             isWaitingForAck = false; 
             processTxQueue(); 
-        }, 70);
+        }, 100);
     }
 }
 
