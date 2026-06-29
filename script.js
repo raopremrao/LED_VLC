@@ -1,5 +1,6 @@
 // ==========================================
 // VLC SECURE LINK - MASTER LOGIC SCRIPT
+// (Updated for FreeRTOS Asynchronous Streaming)
 // ==========================================
 
 // --- BLE Service UUIDs (Nordic UART) ---
@@ -15,71 +16,6 @@ let deviceRX = null, charRX_Read = null, charRX_Write = null;
 let chatIncomingBuffer = "";
 let lastSentMessage = "";
 let lastSentTime = 0;
-
-// ==========================================
-// CHUNKING & ROBUST QUEUE SYSTEM
-// ==========================================
-const CHUNK_SIZE = 10; // Safe size to prevent radio starvation
-let txQueue = [];
-let isWaitingForAck = false;
-let ackTimeout = null; 
-
-async function processTxQueue() {
-    if (txQueue.length === 0 || isWaitingForAck || !charTX_Write) return;
-    
-    isWaitingForAck = true; 
-    let chunk = txQueue.shift(); 
-    
-    try {
-        let encoder = new TextEncoder();
-        await charTX_Write.writeValue(encoder.encode(chunk + '\n'));
-        uiLog('TX', `Sent Chunk: [${chunk}]`, 'sys');
-        
-        // FAILSAFE: Unlock the queue if ESP32 drops the packet
-        ackTimeout = setTimeout(() => {
-            uiLog('TX', `Hardware ACK Timeout! Auto-recovering queue...`, 'err');
-            isWaitingForAck = false;
-            processTxQueue();
-        }, 4000);
-
-    } catch (error) {
-        uiLog('TX', `Send error: ${error}`, 'err');
-        isWaitingForAck = false;
-        setTimeout(processTxQueue, 1000); // Retry next chunk after a second
-    }
-}
-
-function handleTxAck(event) {
-    let text = new TextDecoder('utf-8').decode(event.target.value);
-    if (text.includes("ACK")) {
-        clearTimeout(ackTimeout); 
-        
-        // RACE CONDITION FIX: Give the ESP32 150ms to breathe
-        setTimeout(() => {
-            isWaitingForAck = false; 
-            processTxQueue(); 
-        }, 150);
-    }
-}
-
-function queueMessage(text) {
-    if (!text || !charTX_Write) return false;
-    
-    // Slice the message and inject the End of Message [EOM] token
-    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-        let isLastChunk = (i + CHUNK_SIZE >= text.length);
-        let chunk = text.slice(i, i + CHUNK_SIZE);
-        
-        if (isLastChunk) {
-            chunk += "[EOM]";
-        }
-        
-        txQueue.push(chunk);
-    }
-    
-    processTxQueue();
-    return true;
-}
 
 // ==========================================
 // FUZZY MATCHING (LEVENSHTEIN DISTANCE)
@@ -107,6 +43,33 @@ function calculateSimilarity(a, b) {
     return matrix[b.length][a.length];
 }
 
+// ==========================================
+// ASYNC STREAMING SYSTEM (REPLACES CHUNKING)
+// ==========================================
+async function queueMessage(text) {
+    if (!text || !charTX_Write) return false;
+    
+    // Append EOM token so the receiver knows when to draw the bubble
+    let fullMsg = text + "[EOM]";
+    let encoder = new TextEncoder();
+    
+    // We send in 100-character blocks to avoid crashing the browser's BLE MTU limit,
+    // but we do NOT wait for hardware ACKs anymore. The ESP32 FreeRTOS handles the buffer.
+    for (let i = 0; i < fullMsg.length; i += 100) {
+        let chunk = fullMsg.slice(i, i + 100);
+        
+        try {
+            await charTX_Write.writeValue(encoder.encode(chunk + '\n'));
+            uiLog('TX', `Streamed to Hardware: [${chunk}]`, 'sys');
+            
+            // Tiny 50ms pause to ensure the ESP32's Core 0 has time to push to the queue
+            await new Promise(r => setTimeout(r, 50)); 
+        } catch (error) {
+            uiLog('TX', `Send error: ${error}`, 'err');
+        }
+    }
+    return true;
+}
 
 // ==========================================
 // INCOMING DATA PARSER
@@ -123,29 +86,20 @@ function handleIncomingData(event) {
         // Wait until we see the [EOM] token to draw the bubble
         if (chatIncomingBuffer.includes('[EOM]')) {
             
-            // Clean the token and stray newlines out of the final text
             let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
             let sentMsgClean = lastSentMessage.replace(/\n/g, '').trim();
             
-            // Calculate how many characters are different using the Levenshtein algorithm
             let errorMargin = calculateSimilarity(cleanMsg, sentMsgClean);
-            
-            // Allow up to a 15% error rate (or at least 3 characters) for optical noise
             let allowedErrors = Math.max(3, Math.floor(sentMsgClean.length * 0.15)); 
             
-            // Echo cancellation: Ignore if it's a fuzzy match (allows for dropped VLC bits)
-            // CRITICAL: Timeout increased to 60000ms (60s) for long, slow optical transmissions
+            // Echo cancellation allows for dropped VLC bits, waits up to 60s
             if (errorMargin <= allowedErrors && (Date.now() - lastSentTime) < 60000) {
-                // Optional: Log to the dashboard that an echo was successfully suppressed
                 uiLog('SYS', `Suppressed echo (Noise errors corrected: ${errorMargin})`, 'sys');
-                
                 lastSentMessage = ""; 
             } else if (cleanMsg.length > 0) {
-                // Not an echo (or too much time has passed), render it as a received message!
                 renderChatBubble(cleanMsg, 'rcvd');
             }
             
-            // Flush buffer for the next message
             chatIncomingBuffer = "";
         }
     } else {
@@ -173,11 +127,6 @@ async function connectBLE(role) {
             deviceTX = device;
             charTX_Write = await service.getCharacteristic(UART_TX_CHAR_UUID);
             
-            // Listen for ACKs
-            charTX_Notify = await service.getCharacteristic(UART_RX_CHAR_UUID);
-            await charTX_Notify.startNotifications();
-            charTX_Notify.addEventListener('characteristicvaluechanged', handleTxAck);
-
             deviceTX.addEventListener('gattserverdisconnected', () => handleDisconnect('TX'));
             updateConnectionUI('TX', true, device.name);
             uiLog('TX', `Connected to ${device.name}`, 'sys');
@@ -210,8 +159,7 @@ function handleDisconnect(role) {
     updateConnectionUI(role, false, "");
     uiLog(role, `Device disconnected.`, 'err');
     if (role === 'TX') { 
-        deviceTX = null; charTX_Write = null; charTX_Notify = null; 
-        txQueue = []; isWaitingForAck = false; clearTimeout(ackTimeout);
+        deviceTX = null; charTX_Write = null; 
     } 
     else { deviceRX = null; charRX_Read = null; charRX_Write = null; }
 }
@@ -271,10 +219,10 @@ async function changeRxMode() {
 
 function dashboardSendMessage() {
     const inputEl = document.getElementById('tx-input');
-    if (queueMessage(inputEl.value)) {
+    queueMessage(inputEl.value).then(() => {
         uiLog('TX', `Queued: ${inputEl.value.trim()}`, 'tx');
         inputEl.value = ''; 
-    }
+    });
 }
 
 // ==========================================
@@ -290,12 +238,12 @@ function sendChatMessage() {
         return;
     }
 
-    if (queueMessage(text)) {
+    queueMessage(text).then(() => {
         lastSentMessage = text;
         lastSentTime = Date.now();
         renderChatBubble(text, 'sent');
         inputEl.value = '';
-    }
+    });
 }
 
 function renderChatBubble(text, type) {
