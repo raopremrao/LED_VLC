@@ -90,7 +90,7 @@ function handleIncomingData(event) {
             let sentMsgClean = lastSentMessage.replace(/\n/g, '').trim();
             
             let errorMargin = calculateSimilarity(cleanMsg, sentMsgClean);
-            let allowedErrors = Math.max(3, Math.floor(sentMsgClean.length * 0.15)); 
+            let allowedErrors = Math.max(5, Math.floor(sentMsgClean.length * 0.25)); 
             
             // Echo cancellation allows for dropped VLC bits, waits up to 60s
             if (errorMargin <= allowedErrors && (Date.now() - lastSentTime) < 60000) {
