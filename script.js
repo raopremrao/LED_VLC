@@ -98,9 +98,9 @@ function handleIncomingData(event) {
             
             // Clean the token and stray newlines out of the final text
             let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
-            
+
             // Echo cancellation: Ignore if it perfectly matches what we just sent
-            if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 15000) {
+            if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 60000) {
                 lastSentMessage = ""; 
             } else if (cleanMsg.length > 0) {
                 renderChatBubble(cleanMsg, 'rcvd');
