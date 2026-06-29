@@ -82,6 +82,33 @@ function queueMessage(text) {
 }
 
 // ==========================================
+// FUZZY MATCHING (LEVENSHTEIN DISTANCE)
+// ==========================================
+function calculateSimilarity(a, b) {
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+    let matrix = [];
+    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    
+    for (let i = 1; i <= b.length; i++) {
+        for (let j = 1; j <= a.length; j++) {
+            if (b.charAt(i - 1) === a.charAt(j - 1)) {
+                matrix[i][j] = matrix[i - 1][j - 1];
+            } else {
+                matrix[i][j] = Math.min(
+                    matrix[i - 1][j - 1] + 1, // substitution
+                    Math.min(matrix[i][j - 1] + 1, // insertion
+                    matrix[i - 1][j] + 1) // deletion
+                );
+            }
+        }
+    }
+    return matrix[b.length][a.length];
+}
+
+
+// ==========================================
 // INCOMING DATA PARSER
 // ==========================================
 function handleIncomingData(event) {
@@ -98,11 +125,23 @@ function handleIncomingData(event) {
             
             // Clean the token and stray newlines out of the final text
             let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
-
-            // Echo cancellation: Ignore if it perfectly matches what we just sent
-            if (cleanMsg === lastSentMessage && (Date.now() - lastSentTime) < 60000) {
+            let sentMsgClean = lastSentMessage.replace(/\n/g, '').trim();
+            
+            // Calculate how many characters are different using the Levenshtein algorithm
+            let errorMargin = calculateSimilarity(cleanMsg, sentMsgClean);
+            
+            // Allow up to a 15% error rate (or at least 3 characters) for optical noise
+            let allowedErrors = Math.max(3, Math.floor(sentMsgClean.length * 0.15)); 
+            
+            // Echo cancellation: Ignore if it's a fuzzy match (allows for dropped VLC bits)
+            // CRITICAL: Timeout increased to 60000ms (60s) for long, slow optical transmissions
+            if (errorMargin <= allowedErrors && (Date.now() - lastSentTime) < 60000) {
+                // Optional: Log to the dashboard that an echo was successfully suppressed
+                uiLog('SYS', `Suppressed echo (Noise errors corrected: ${errorMargin})`, 'sys');
+                
                 lastSentMessage = ""; 
             } else if (cleanMsg.length > 0) {
+                // Not an echo (or too much time has passed), render it as a received message!
                 renderChatBubble(cleanMsg, 'rcvd');
             }
             
