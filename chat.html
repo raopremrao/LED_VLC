@@ -30,16 +30,28 @@
         </div>
         </div>
 
-    <div class="wa-footer">
-        <input type="file" id="image-input" accept="image/*" style="display: none;" onchange="sendImage()">
+    <div class="wa-footer" style="position: relative;">
+        <div id="image-staging-area" style="display: none; position: absolute; bottom: 65px; left: 10px; right: 10px; background: #1e2428; padding: 10px; border-radius: 10px; border: 1px solid #2a3942; z-index: 10;">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <img id="staging-preview" src="" style="height: 60px; max-width: 60px; border-radius: 5px; object-fit: cover;">
+                <div style="flex-grow: 1; padding-left: 15px; color: #e9edef;">
+                    <div id="staging-filename" style="font-weight: bold; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;"></div>
+                    <div id="staging-info" style="font-size: 12px; color: #8696a0;"></div>
+                    <div id="staging-warning" style="font-size: 11px; color: #ef9a9a; margin-top: 4px;"></div>
+                </div>
+                <button onclick="cancelStagedImage()" style="background: none; border: none; color: #8696a0; font-size: 20px; cursor: pointer;">✖</button>
+            </div>
+        </div>
+
+        <input type="file" id="image-input" accept="image/*" style="display: none;" onchange="stageImage()">
         
-        <button class="wa-icon-btn" onclick="document.getElementById('image-input').click()" title="Send Image" style="background: none; border: none; font-size: 24px; cursor: pointer; padding-right: 10px;">
-            📷
+        <button class="wa-icon-btn" onclick="document.getElementById('image-input').click()" title="Attach File" style="background: none; border: none; font-size: 24px; cursor: pointer; padding-right: 10px;">
+            📎
         </button>
 
         <input type="text" id="chat-input" class="wa-input" placeholder="Type a message" autocomplete="off">
         
-        <button class="wa-send-btn" onclick="sendChatMessage()">
+        <button class="wa-send-btn" onclick="handleMasterSend()">
             <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
                 <path d="M1.101 21.757 23.8 12.028 1.101 2.3l.011 7.912 13.623 1.816-13.623 1.817-.011 7.912z"></path>
             </svg>

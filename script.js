@@ -1,18 +1,15 @@
 // ==========================================
 // VLC SECURE LINK - MASTER LOGIC SCRIPT
-// (Includes Async Streaming, Image Transfer & Full BLE Logic)
+// (Raw Uncompressed File Transfer via Base64)
 // ==========================================
 
-// --- BLE Service UUIDs (Nordic UART) ---
 const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; 
 const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; 
 
-// --- Device State ---
 let deviceTX = null, charTX_Write = null, charTX_Notify = null;
 let deviceRX = null, charRX_Read = null, charRX_Write = null;
 
-// --- Chat Buffers & Echo Cancellation ---
 let chatIncomingBuffer = "";
 let lastSentMessage = "";
 let lastSentTime = 0;
@@ -45,57 +42,82 @@ function calculateSimilarity(a, b) {
 }
 
 // ==========================================
-// IMAGE PROCESSING & DOWNSCALING
+// FILE STAGING & SENDING
 // ==========================================
-function sendImage() {
+let stagedFile = null;
+
+function stageImage() {
     const fileInput = document.getElementById('image-input');
     const file = fileInput.files[0];
-    if (!file || !charTX_Write) return;
+    if (!file) return;
 
-    uiLog('SYS', `Processing image...`, 'sys');
+    stagedFile = file;
+    document.getElementById('image-staging-area').style.display = 'block';
+    document.getElementById('staging-filename').innerText = file.name;
+    
+    let sizeKB = (file.size / 1024).toFixed(1);
+    let estSeconds = Math.floor(file.size / 25);
+    let timeStr = estSeconds > 60 ? `${(estSeconds/60).toFixed(1)} mins` : `${estSeconds} secs`;
+    
+    document.getElementById('staging-info').innerText = `${sizeKB} KB | Est. VLC Time: ~${timeStr}`;
+    
+    let warningEl = document.getElementById('staging-warning');
+    if (file.size > 50000) {
+        warningEl.innerText = "⚠️ Huge file! Hardware will take a very long time to flash.";
+    } else {
+        warningEl.innerText = "";
+    }
 
     const reader = new FileReader();
-    reader.onload = function(event) {
-        const img = new Image();
-        img.onload = function() {
-            const canvas = document.createElement('canvas');
-            const MAX_SIZE = 64; 
-            let width = img.width;
-            let height = img.height;
-
-            if (width > height) {
-                if (width > MAX_SIZE) {
-                    height *= MAX_SIZE / width;
-                    width = MAX_SIZE;
-                }
-            } else {
-                if (height > MAX_SIZE) {
-                    width *= MAX_SIZE / height;
-                    height = MAX_SIZE;
-                }
-            }
-            canvas.width = width;
-            canvas.height = height;
-            
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0, width, height);
-
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.4); 
-            let payload = "[IMG_START]" + dataUrl + "[IMG_END]";
-            
-            isSendingImage = true;
-            lastSentTime = Date.now();
-            
-            uiLog('TX', `Image compressed. Streaming...`, 'tx');
-
-            queueMessage(payload).then(() => {
-                renderChatBubble(dataUrl, 'sent', true);
-                fileInput.value = ""; 
-            });
-        }
-        img.src = event.target.result;
-    }
+    reader.onload = function(e) { document.getElementById('staging-preview').src = e.target.result; }
     reader.readAsDataURL(file);
+}
+
+function cancelStagedImage() {
+    stagedFile = null;
+    document.getElementById('image-input').value = "";
+    document.getElementById('image-staging-area').style.display = 'none';
+}
+
+function handleMasterSend() {
+    if (stagedFile) sendStagedRawImage();
+    else sendChatMessage();
+}
+
+function sendStagedRawImage() {
+    if (!stagedFile || !charTX_Write) {
+        alert("Please connect Transmitter first!");
+        return;
+    }
+
+    uiLog('SYS', `Reading raw file into Base64...`, 'sys');
+    
+    const reader = new FileReader();
+    reader.onload = function(event) {
+        // This is the raw, uncompressed file formatted as a Data URL
+        const rawBase64Data = event.target.result; 
+        
+        // Construct payload: [IMG_START]filename.jpg|data:image/jpeg;base64,....[IMG_END]
+        const payload = `[IMG_START]${stagedFile.name}|${rawBase64Data}[IMG_END]`;
+        
+        isSendingImage = true;
+        lastSentTime = Date.now();
+        
+        uiLog('TX', `File loaded (${payload.length} chars). Streaming to ESP32...`, 'tx');
+
+        // Create a local object URL to render in our own chat immediately
+        const localUrl = URL.createObjectURL(stagedFile);
+        renderChatBubble(localUrl, 'sent', true, stagedFile.name);
+
+        queueMessage(payload).then(() => {
+            uiLog('SYS', `Transfer complete.`, 'sys');
+        });
+
+        cancelStagedImage(); // clear staging area
+    };
+    
+    // Read the exact original file
+    reader.readAsDataURL(stagedFile);
 }
 
 // ==========================================
@@ -133,33 +155,47 @@ function handleIncomingData(event) {
         // --- 1. HANDLE INCOMING TEXT ---
         if (chatIncomingBuffer.includes('[EOM]')) {
             let cleanMsg = chatIncomingBuffer.replace(/\[EOM\]/g, '').replace(/\n/g, '').trim();
-            let sentMsgClean = lastSentMessage.replace(/\n/g, '').trim();
             
-            let errorMargin = calculateSimilarity(cleanMsg, sentMsgClean);
-            let allowedErrors = Math.max(5, Math.floor(sentMsgClean.length * 0.25)); 
-            
-            if (!isSendingImage && errorMargin <= allowedErrors && (Date.now() - lastSentTime) < 60000) {
-                lastSentMessage = ""; 
-            } else if (cleanMsg.length > 0) {
-                renderChatBubble(cleanMsg, 'rcvd', false);
+            // Prevent Levenshtein on massive file chunks
+            if (!cleanMsg.includes('[IMG_START]')) {
+                let sentMsgClean = lastSentMessage.replace(/\n/g, '').trim();
+                let errorMargin = calculateSimilarity(cleanMsg, sentMsgClean);
+                let allowedErrors = Math.max(5, Math.floor(sentMsgClean.length * 0.25)); 
+                
+                if (!isSendingImage && errorMargin <= allowedErrors && (Date.now() - lastSentTime) < 60000) {
+                    lastSentMessage = ""; 
+                } else if (cleanMsg.length > 0) {
+                    renderChatBubble(cleanMsg, 'rcvd', false);
+                }
             }
             chatIncomingBuffer = "";
         }
         
-        // --- 2. HANDLE INCOMING IMAGES ---
+        // --- 2. HANDLE INCOMING RAW FILES ---
         else if (chatIncomingBuffer.includes('[IMG_END]')) {
             try {
                 let startIndex = chatIncomingBuffer.indexOf('[IMG_START]') + 11;
                 let endIndex = chatIncomingBuffer.indexOf('[IMG_END]');
-                let base64Data = chatIncomingBuffer.substring(startIndex, endIndex).replace(/\n/g, '').trim();
+                let payload = chatIncomingBuffer.substring(startIndex, endIndex).replace(/\n/g, '').trim();
                 
-                if (isSendingImage && (Date.now() - lastSentTime) < 120000) {
+                // Echo Cancellation for Files
+                if (isSendingImage && (Date.now() - lastSentTime) < 300000) { 
+                    uiLog('SYS', `Suppressed raw file echo.`, 'sys');
                     isSendingImage = false;
-                } else if (base64Data.length > 0) {
-                    renderChatBubble(base64Data, 'rcvd', true);
+                } else if (payload.length > 0) {
+                    
+                    // Parse Metadata
+                    let pipeIndex = payload.indexOf('|');
+                    let fileName = payload.substring(0, pipeIndex);
+                    let base64DataUrl = payload.substring(pipeIndex + 1);
+                    
+                    uiLog('SYS', `Received raw file: ${fileName}`, 'sys');
+                    
+                    // Render straight to chat. The browser handles the Base64 download natively!
+                    renderChatBubble(base64DataUrl, 'rcvd', true, fileName);
                 }
             } catch (e) {
-                uiLog('ERR', 'Failed to parse incoming image.', 'err');
+                uiLog('ERR', 'Failed to process incoming file.', 'err');
             }
             chatIncomingBuffer = "";
         }
@@ -316,7 +352,7 @@ function sendChatMessage() {
     });
 }
 
-function renderChatBubble(content, type, isImage) {
+function renderChatBubble(content, type, isFile, fileName = "download") {
     const windowEl = document.getElementById('chat-window');
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     
@@ -326,8 +362,12 @@ function renderChatBubble(content, type, isImage) {
     const bubble = document.createElement('div');
     bubble.className = `wa-bubble`;
     
-    if (isImage) {
-        bubble.innerHTML = `<img src="${content}" style="max-width: 150px; border-radius: 8px;" alt="VLC Image"/><span class="wa-msg-time">${time}</span>`;
+    if (isFile) {
+        bubble.innerHTML = `
+            <img src="${content}" style="max-width: 150px; border-radius: 8px; display: block; margin-bottom: 5px;" alt="Raw Image"/>
+            <a href="${content}" download="${fileName}" style="display: inline-block; background: #00a884; color: white; text-decoration: none; padding: 5px 10px; border-radius: 5px; font-size: 12px; font-weight: bold;">📥 Download Original</a>
+            <span class="wa-msg-time" style="display: block; margin-top: 5px;">${time}</span>
+        `;
     } else {
         bubble.innerHTML = `<span class="wa-msg-text">${content}</span><span class="wa-msg-time">${time}</span>`;
     }
@@ -344,7 +384,7 @@ window.onload = () => {
         chatInput.addEventListener("keypress", function(event) {
             if (event.key === "Enter") {
                 event.preventDefault();
-                sendChatMessage();
+                handleMasterSend();
             }
         });
     }
