@@ -8,6 +8,7 @@ const UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // Laptop writ
 let deviceBLE = null;
 let txCharacteristic = null;
 let rxCharacteristic = null;
+let lastPacketTime = null; // ADD THIS
 
 // Audio Configuration
 const SAMPLE_RATE = 8000; 
@@ -124,6 +125,10 @@ function initAudioContext() {
 
 function handleIncomingAudio(event) {
     const rawData = new Uint8Array(event.target.value.buffer);
+
+    // ADD THIS — log every packet immediately, no matter how small
+    uiLog('RX', `Packet received: ${rawData.length} bytes`, 'sys');
+    lastPacketTime = Date.now(); // ADD THIS too (see watchdog below)
     
     // Push incoming BLE bytes into our giant array
     for (let i = 0; i < rawData.length; i++) {
@@ -173,6 +178,21 @@ function playAudioChunk(uint8Array) {
     nextPlayTime += audioBuffer.duration;
 }
 
+// ADD THIS FUNCTION
+function startWatchdog() {
+    setInterval(() => {
+        if (!rxCharacteristic) return;
+        if (lastPacketTime === null) {
+            uiLog('RX', 'Waiting for first packet... (no data received yet)', 'err');
+        } else {
+            const secsAgo = ((Date.now() - lastPacketTime) / 1000).toFixed(1);
+            if (secsAgo > 3) {
+                uiLog('RX', `No new data for ${secsAgo}s — check laser alignment / TX connection`, 'err');
+            }
+        }
+    }, 3000);
+}
+
 // ==========================================
 // BLE CONNECTION HANDLER
 // ==========================================
@@ -194,12 +214,22 @@ async function connectBLE(role) {
         
         deviceBLE = device;
 
+        // ADDED: catch unexpected disconnects for both roles
+        device.addEventListener('gattserverdisconnected', () => {
+            uiLog(role, 'Device disconnected unexpectedly!', 'err');
+            document.getElementById(`status-${role.toLowerCase()}`).innerText = `Status: Disconnected`;
+        });
+
         if (role === 'TX') {
             txCharacteristic = await service.getCharacteristic(UART_RX_CHAR_UUID);
         } else {
             rxCharacteristic = await service.getCharacteristic(UART_TX_CHAR_UUID);
             await rxCharacteristic.startNotifications();
             rxCharacteristic.addEventListener('characteristicvaluechanged', handleIncomingAudio);
+
+            // ADDED: confirm notifications are live, and start the watchdog
+            uiLog('RX', 'Notifications ACTIVE — listening for BLE packets...', 'sys');
+            startWatchdog();
         }
         
         document.getElementById(`status-${role.toLowerCase()}`).innerText = `Status: Connected to ${device.name}`;
