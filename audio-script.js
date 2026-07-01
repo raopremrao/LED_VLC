@@ -111,6 +111,7 @@ let isPlaying = false;
 
 // The Watermark: Wait for 4096 bytes (~0.5 seconds of audio) before starting playback
 const PLAYBACK_WATERMARK = 4096; 
+const RESUME_WATERMARK = 1024; 
 // const CHUNK_SIZE_BYTES = 1024; // Process in 1024 byte chunks
 
 function initAudioContext() {
@@ -125,30 +126,28 @@ function initAudioContext() {
 
 function handleIncomingAudio(event) {
     const rawData = new Uint8Array(event.target.value.buffer);
-
-    // ADD THIS — log every packet immediately, no matter how small
     uiLog('RX', `Packet received: ${rawData.length} bytes`, 'sys');
-    lastPacketTime = Date.now(); // ADD THIS too (see watchdog below)
+    lastPacketTime = Date.now();
     
-    // Push incoming BLE bytes into our giant array
     for (let i = 0; i < rawData.length; i++) {
         receiveBuffer.push(rawData[i]);
     }
-    
     document.getElementById('rx-buffer-status').innerText = `Buffer: ${receiveBuffer.length} bytes`;
 
-    // Phase 1: Buffering (Filling the bucket)
-    if (!isPlaying && receiveBuffer.length >= PLAYBACK_WATERMARK) {
+    // CHANGED: use RESUME_WATERMARK if we've already played before, else full watermark
+    const requiredWatermark = (nextPlayTime > 0) ? RESUME_WATERMARK : PLAYBACK_WATERMARK;
+
+    if (!isPlaying && receiveBuffer.length >= requiredWatermark) {
         isPlaying = true;
-        nextPlayTime = audioCtx.currentTime + 0.1; // Add 100ms safety padding
+        nextPlayTime = audioCtx.currentTime + 0.1;
         uiLog('RX', 'Buffer filled. Initiating playback stream...', 'sys');
     }
 
-    // Phase 2: Playback (Draining the bucket)
     if (isPlaying && receiveBuffer.length >= CHUNK_SIZE_BYTES) {
         playAudioChunk(receiveBuffer.splice(0, CHUNK_SIZE_BYTES));
     }
 }
+
 
 function playAudioChunk(uint8Array) {
     if (!audioCtx) return;
@@ -156,7 +155,6 @@ function playAudioChunk(uint8Array) {
     const audioBuffer = audioCtx.createBuffer(1, uint8Array.length, SAMPLE_RATE);
     const channelData = audioBuffer.getChannelData(0);
 
-    // Convert UInt8 (0-255) back to Float32 (-1.0 to 1.0)
     for (let i = 0; i < uint8Array.length; i++) {
         channelData[i] = (uint8Array[i] - 127.5) / 127.5;
     }
@@ -165,13 +163,10 @@ function playAudioChunk(uint8Array) {
     source.buffer = audioBuffer;
     source.connect(audioCtx.destination);
 
-    // CRITICAL FIX: Buffer Underrun Protection
-    // If the BLE stream falls behind and our scheduled time is in the past,
-    // the stream has starved. We must reset the clock and pause playback to re-buffer.
     if (nextPlayTime < audioCtx.currentTime) {
-        uiLog('RX', 'Buffer underrun (starvation)! Pausing to refill...', 'err');
-        isPlaying = false; 
-        return; 
+        // CHANGED: don't fully drop out of playing mode, just resync the clock
+        uiLog('RX', 'Underrun — resyncing clock (not full reset)', 'err');
+        nextPlayTime = audioCtx.currentTime + 0.05; // small 50ms catch-up pad
     }
     
     source.start(nextPlayTime);
