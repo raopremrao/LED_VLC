@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLC Audio Transceiver</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        .audio-controls { margin: 20px 0; padding: 15px; background: #1e2428; border-radius: 8px; border: 1px solid #2a3942; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header-nav">
+        <h1>Optical Audio Link</h1>
+    </div>
+
+    <div class="tabs">
+        <div id="tab-tx" class="tab active" onclick="switchTab('tx')">Transmitter (TX)</div>
+        <div id="tab-rx" class="tab" onclick="switchTab('rx')">Receiver (RX)</div>
+    </div>
+
+    <div id="panel-tx" class="panel active">
+        <div style="margin-bottom: 15px;">
+            <button class="btn" id="btn-conn-tx" onclick="connectBLE('TX')">Connect TX Laser</button>
+            <span id="status-tx" style="margin-left:10px; color:#888;">Status: Disconnected</span>
+        </div>
+
+        <div class="audio-controls">
+            <h3 style="color: #e9edef; margin-bottom: 10px;">1. Load Audio File</h3>
+            <input type="file" id="audio-input" accept="audio/*" onchange="processAudioFile(event)">
+            
+            <h3 style="color: #e9edef; margin-top: 15px; margin-bottom: 10px;">2. Stream over Laser</h3>
+            <button class="btn" onclick="streamAudioBuffer()" id="btn-stream" disabled>Start Optical Stream</button>
+            <div id="stream-progress" style="margin-top: 10px; color: #00a884; font-size: 14px;"></div>
+        </div>
+        <div class="console" id="console-tx"></div>
+    </div>
+
+    <div id="panel-rx" class="panel hidden">
+        <div style="margin-bottom: 15px;">
+            <button class="btn" id="btn-conn-rx" onclick="connectBLE('RX')">Connect RX Sensor</button>
+            <span id="status-rx" style="margin-left:10px; color:#888;">Status: Disconnected</span>
+        </div>
+
+        <div class="audio-controls">
+            <h3 style="color: #e9edef; margin-bottom: 10px;">Live Audio Playback</h3>
+            <p style="color: #8696a0; font-size: 14px;">Audio will play automatically when laser data is received.</p>
+            <div id="rx-buffer-status" style="margin-top: 10px; color: #00a884; font-size: 14px;">Buffer: 0 bytes</div>
+        </div>
+        <div class="console" id="console-rx"></div>
+    </div>
+</div>
+
+<script src="audio-script.js"></script>
+</body>
+</html>
