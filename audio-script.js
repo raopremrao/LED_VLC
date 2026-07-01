@@ -80,7 +80,7 @@ async function streamAudioBuffer() {
 
     uiLog('TX', `Firing laser...`, 'sys');
     const chunkSize = 64; 
-    const delayMs = 15; // Tweak this based on ESP32 processing speed
+    const delayMs = 8; // Tweak this based on ESP32 processing speed
 
     for (let i = 0; i < pcmDataBuffer.length; i += chunkSize) {
         let chunk = pcmDataBuffer.slice(i, i + chunkSize);
