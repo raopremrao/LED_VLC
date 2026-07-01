@@ -85,13 +85,17 @@ async function streamAudioBuffer() {
     for (let i = 0; i < pcmDataBuffer.length; i += chunkSize) {
         let chunk = pcmDataBuffer.slice(i, i + chunkSize);
         try {
-            await txCharacteristic.writeValue(chunk);
+            // Use WriteWithoutResponse for faster, fire-and-forget streaming
+            await txCharacteristic.writeValueWithoutResponse(chunk);
+            
             if (i % (chunkSize * 10) === 0) {
                 document.getElementById('stream-progress').innerText = `Progress: ${((i / pcmDataBuffer.length) * 100).toFixed(1)}%`;
             }
             await new Promise(r => setTimeout(r, delayMs));
         } catch (error) {
-            uiLog('TX', `Stream halted.`, 'err');
+            // Print the actual system error so we aren't flying blind
+            uiLog('TX', `Halted: ${error.message}`, 'err');
+            console.error(error);
             break;
         }
     }
