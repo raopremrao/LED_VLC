@@ -17,6 +17,13 @@
         <h1>Optical Audio Link</h1>
     </div>
 
+    <!-- ADDED: calibration section, needs both devices connected -->
+    <div class="audio-controls" id="calibration-section">
+        <h3 style="color:#e9edef; margin-bottom:10px;">Calibration (connect both TX & RX first)</h3>
+        <button class="btn" onclick="startCalibration()" id="btn-calibrate">Calibrate System</button>
+        <div id="calibration-status" style="margin-top:10px; color:#00a884; font-size:14px;"></div>
+    </div>
+
     <div class="tabs">
         <div id="tab-tx" class="tab active" onclick="switchTab('tx')">Transmitter (TX)</div>
         <div id="tab-rx" class="tab" onclick="switchTab('rx')">Receiver (RX)</div>
@@ -31,7 +38,7 @@
         <div class="audio-controls">
             <h3 style="color: #e9edef; margin-bottom: 10px;">1. Load Audio File</h3>
             <input type="file" id="audio-input" accept="audio/*" onchange="processAudioFile(event)">
-            
+
             <h3 style="color: #e9edef; margin-top: 15px; margin-bottom: 10px;">2. Stream over Laser</h3>
             <button class="btn" onclick="streamAudioBuffer()" id="btn-stream" disabled>Start Optical Stream</button>
             <div id="stream-progress" style="margin-top: 10px; color: #00a884; font-size: 14px;"></div>
